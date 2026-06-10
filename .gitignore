@@ -1,0 +1,12 @@
+/venv/
+/data/
+/models/
+.env
+__pycache__/
+*.pyc
+.vscode/
+
+!/data/raw/.gitkeep
+!/data/features/.gitkeep
+!/data/predictions/.gitkeep
+!/models/.gitkeep

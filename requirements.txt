@@ -1,0 +1,6 @@
+pandas
+numpy
+scikit-learn
+nfl_data_py
+requests
+python-dotenv
