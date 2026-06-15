@@ -158,7 +158,7 @@ def resolve_starters(season, week):
     return starters, summary
 
 
-def run_week(season, week, lines=None, force=False):
+def run_week(season, week, lines=None, force=False, line_overrides=None, label=None):
     """Generate and save QB passing-yards predictions for (season, week).
 
     1. Trains the standard Ridge pipeline on all rows strictly before
@@ -178,6 +178,13 @@ def run_week(season, week, lines=None, force=False):
        force=True (a warning is printed when forcing).
 
     `lines`: optional dict {team: line} of sportsbook passing-yards lines.
+
+    `line_overrides`: optional dict {team: (spread_line, total_line)},
+    passed through to build_prediction_features.
+
+    `label`: optional string; if set, the output filename becomes
+    data/predictions/{season}_w{week:02d}_qb_pass_yards_{label}.parquet,
+    for non-canonical/test runs that mustn't collide with real weekly logs.
     """
     qb_matrix = pd.read_parquet(FEATURES_DIR / "qb_matrix.parquet")
     df_processed = preprocess_qb_matrix(qb_matrix)
@@ -218,7 +225,7 @@ def run_week(season, week, lines=None, force=False):
     print("Starter resolution:")
     print(starter_summary.to_string(index=False))
 
-    features = build_prediction_features(season, week, starters=starters)
+    features = build_prediction_features(season, week, starters=starters, line_overrides=line_overrides)
     features = preprocess_qb_matrix(features)
 
     raw_pred = final_pipeline.predict(features[FEATURE_COLS])
@@ -230,7 +237,7 @@ def run_week(season, week, lines=None, force=False):
     players = pd.read_parquet(RAW_DATA_DIR / "players.parquet")
     name_lookup = players.drop_duplicates("gsis_id").set_index("gsis_id")["display_name"]
 
-    result = features[["season", "week", "team", "opponent", "qb_id"]].reset_index(drop=True).copy()
+    result = features[["season", "week", "team", "opponent", "qb_id", "team_implied_total"]].reset_index(drop=True).copy()
     result["qb_name"] = result["qb_id"].map(name_lookup).fillna(result["qb_id"])
     result["pred_passing_yards"] = calibrated_pred
     for level, col in zip(QUANTILE_LEVELS, quantiles.T):
@@ -250,7 +257,8 @@ def run_week(season, week, lines=None, force=False):
     result = result.sort_values("pred_passing_yards", ascending=False).reset_index(drop=True)
 
     PREDICTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = PREDICTIONS_DIR / f"{season}_w{week:02d}_qb_pass_yards.parquet"
+    suffix = f"_{label}" if label else ""
+    out_path = PREDICTIONS_DIR / f"{season}_w{week:02d}_qb_pass_yards{suffix}.parquet"
     if out_path.exists():
         if not force:
             raise FileExistsError(
@@ -269,9 +277,10 @@ def main():
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--week", type=int, required=True)
     parser.add_argument("--force", action="store_true", help="overwrite an existing prediction log")
+    parser.add_argument("--label", default=None, help="suffix for non-canonical/test runs (avoids overwriting real weekly logs)")
     args = parser.parse_args()
 
-    result = run_week(args.season, args.week, force=args.force)
+    result = run_week(args.season, args.week, force=args.force, label=args.label)
     print("\nPredictions:")
     print(result.to_string(index=False))
 

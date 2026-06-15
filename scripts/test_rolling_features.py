@@ -13,6 +13,10 @@ import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MATRIX_PATH = PROJECT_ROOT / "data" / "features" / "qb_matrix.parquet"
+RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+from src.features.engineer import DEFENSE_COLS
 
 ROLLING_SUFFIXES = ["_l3", "_l8", "_std"]
 STAT_COLS = [
@@ -119,6 +123,54 @@ for col in std_cols:
 print(f"PASS: {next_season_first['player_display_name']}'s {seasons[1]} week "
       f"{next_season_first['week']} (first game of new season) has NaN for all "
       f"{len(std_cols)} season-to-date (_std) columns")
+
+
+
+# --- Test 6: Defense feature correctness + first-appearance NaN ---
+section("Test 6: Defense features (CIN 2023 week 10) + first-appearance NaN")
+
+player_stats = pd.read_parquet(RAW_DATA_DIR / "player_stats.parquet")
+schedules = pd.read_parquet(RAW_DATA_DIR / "schedules.parquet")
+
+cin_games = []
+for _, srow in schedules.iterrows():
+    if srow["home_team"] == "CIN":
+        cin_games.append({"season": srow["season"], "week": srow["week"], "offense_team": srow["away_team"]})
+    elif srow["away_team"] == "CIN":
+        cin_games.append({"season": srow["season"], "week": srow["week"], "offense_team": srow["home_team"]})
+
+cin_games_df = pd.DataFrame(cin_games).sort_values(["season", "week"]).reset_index(drop=True)
+
+target_idx = cin_games_df.index[(cin_games_df["season"] == 2023) & (cin_games_df["week"] == 10)][0]
+prior_8 = cin_games_df.iloc[target_idx - 8:target_idx]
+assert len(prior_8) == 8, f"expected 8 prior games for CIN before 2023 week 10, got {len(prior_8)}"
+
+allowed = []
+for _, g in prior_8.iterrows():
+    pys = player_stats[
+        (player_stats["season"] == g["season"]) & (player_stats["week"] == g["week"]) & (player_stats["team"] == g["offense_team"])
+    ]["passing_yards"].sum()
+    allowed.append(pys)
+
+manual_l8 = sum(allowed) / len(allowed)
+
+target_row = df[(df["season"] == 2023) & (df["week"] == 10) & (df["opponent"] == "CIN")].iloc[0]
+
+assert math.isclose(target_row["def_pass_yards_allowed_l8"], manual_l8), (
+    f"matrix def_pass_yards_allowed_l8 ({target_row['def_pass_yards_allowed_l8']}) != "
+    f"manual recompute of CIN's prior 8 games ({manual_l8})"
+)
+print(f"PASS: CIN 2023 week 10 def_pass_yards_allowed_l8 ({target_row['def_pass_yards_allowed_l8']}) == "
+      f"manual mean of CIN's prior 8 games' passing yards allowed ({manual_l8})")
+
+first_cin_row = df[df["opponent"] == "CIN"].sort_values(["season", "week"]).iloc[0]
+for col in DEFENSE_COLS:
+    assert pd.isna(first_cin_row[col]), (
+        f"{col} is not NaN for CIN's first appearance as a defense "
+        f"({first_cin_row['season']} week {first_cin_row['week']}): {first_cin_row[col]}"
+    )
+print(f"PASS: CIN's first appearance as a defense ({first_cin_row['season']} week {first_cin_row['week']}) "
+      f"has NaN for all {len(DEFENSE_COLS)} defense feature columns")
 
 
 print("\nAll tests passed.")

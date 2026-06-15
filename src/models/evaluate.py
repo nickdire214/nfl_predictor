@@ -68,7 +68,7 @@ def grade_week(season, week, force=False):
 
     def classify(row):
         if pd.isna(row["actual_qb_id"]):
-            return "NO_GAME"
+            return "NO_STATS"
         if row["qb_id"] == row["actual_qb_id"]:
             return "GRADED"
         return "WRONG_STARTER"
@@ -112,11 +112,11 @@ def grade_week(season, week, force=False):
     # --- Summary ---
     n_graded = int(graded_mask.sum())
     n_wrong_starter = int((grades["status"] == "WRONG_STARTER").sum())
-    n_no_game = int((grades["status"] == "NO_GAME").sum())
+    n_no_stats = int((grades["status"] == "NO_STATS").sum())
     n_played = n_graded + n_wrong_starter
 
     print("\nSummary:")
-    print(f"  rows: {len(grades)} (GRADED={n_graded}, WRONG_STARTER={n_wrong_starter}, NO_GAME={n_no_game})")
+    print(f"  rows: {len(grades)} (GRADED={n_graded}, WRONG_STARTER={n_wrong_starter}, NO_STATS={n_no_stats})")
 
     if n_wrong_starter:
         print("  wrong-starter games:")

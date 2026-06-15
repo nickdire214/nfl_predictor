@@ -11,6 +11,7 @@ import nflreadpy as nfl
 from src.ingestion._common import RAW_DATA_DIR, save_parquet
 
 SEASONS = list(range(2021, 2026))
+SCHEDULE_SEASONS = list(range(2021, 2027))
 
 
 def ingest_player_stats(seasons):
@@ -39,13 +40,13 @@ def ingest_players():
 
 def main():
     seasonal_datasets = {
-        "player_stats": ingest_player_stats,
-        "snap_counts": ingest_snap_counts,
-        "schedules": ingest_schedules,
+        "player_stats": (ingest_player_stats, SEASONS),
+        "snap_counts": (ingest_snap_counts, SEASONS),
+        "schedules": (ingest_schedules, SCHEDULE_SEASONS),
     }
 
-    for name, ingest_fn in seasonal_datasets.items():
-        df = ingest_fn(SEASONS)
+    for name, (ingest_fn, seasons) in seasonal_datasets.items():
+        df = ingest_fn(seasons)
         path = RAW_DATA_DIR / f"{name}.parquet"
 
         if df.empty:

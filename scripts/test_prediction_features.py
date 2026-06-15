@@ -17,7 +17,7 @@ RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
 FEATURES_DIR = PROJECT_ROOT / "data" / "features"
 
 sys.path.insert(0, str(PROJECT_ROOT))
-from src.features.engineer import STAT_COLS, build_prediction_features
+from src.features.engineer import DEFENSE_COLS, STAT_COLS, build_prediction_features
 from src.models.train import ROLLING_COLS
 
 
@@ -38,7 +38,7 @@ def values_match(a, b, tol=1e-6):
         return a == b
 
 
-COMPARE_COLS = ROLLING_COLS + [
+COMPARE_COLS = ROLLING_COLS + DEFENSE_COLS + [
     "is_home", "team_rest", "opponent_rest", "div_game", "team_implied_total",
     "spread_line", "total_line", "games_into_season", "temp", "wind",
 ]

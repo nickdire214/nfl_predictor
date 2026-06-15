@@ -8,6 +8,7 @@ joins and game-context features only, no rolling windows yet.
 import numpy as np
 import pandas as pd
 
+from src.features.rolling import add_rolling_features as _add_rolling_features
 from src.ingestion._common import PROJECT_ROOT
 
 RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
@@ -146,29 +147,65 @@ STAT_COLS = [
     "passing_interceptions", "passing_epa", "passing_cpoe", "sacks_suffered",
 ]
 
+DEFENSE_COLS = [
+    "def_pass_yards_allowed_l8", "def_pass_yards_allowed_std",
+    "def_pass_epa_allowed_l8", "def_pass_epa_allowed_std",
+]
+
+
+def _build_defense_table(player_stats):
+    """Build per-(season, week, defense_team) opponent pass-defense features.
+
+    For every scheduled team-game (2021-2026, from schedules), "allowed"
+    stats are the opposing offense's summed passing_yards/passing_epa for
+    that game. Rolling features use the same shift-then-roll pattern as
+    the QB stat columns: def_*_l8 is an 8-game rolling mean (crosses
+    seasons), def_*_std is a season-to-date expanding mean (resets each
+    season). Both are computed from games strictly before (season, week)
+    via the shift, so joining this table on (season, week, defense_team)
+    is leakage-safe for any season/week, including future ones.
+    """
+    schedules = pd.read_parquet(RAW_DATA_DIR / "schedules.parquet")
+    team_games = _build_team_game_view(schedules)[["season", "week", "team", "opponent"]]
+
+    offense = player_stats.groupby(["season", "week", "team"], as_index=False).agg(
+        def_pass_yards_allowed=("passing_yards", "sum"),
+        def_pass_epa_allowed=("passing_epa", "sum"),
+    )
+
+    defense = team_games.rename(columns={"team": "defense_team", "opponent": "offense_team"})
+    defense = defense.merge(
+        offense.rename(columns={"team": "offense_team"}),
+        on=["season", "week", "offense_team"],
+        how="left",
+    )
+
+    defense = defense.sort_values(["defense_team", "season", "week"]).reset_index(drop=True)
+
+    for col in ["def_pass_yards_allowed", "def_pass_epa_allowed"]:
+        shifted = defense.groupby("defense_team")[col].shift(1)
+        defense[f"{col}_l8"] = (
+            shifted.groupby(defense["defense_team"]).transform(lambda s: s.rolling(window=8, min_periods=1).mean())
+        )
+
+        shifted_season = defense.groupby(["defense_team", "season"])[col].shift(1)
+        defense[f"{col}_std"] = (
+            shifted_season.groupby([defense["defense_team"], defense["season"]]).transform(lambda s: s.expanding().mean())
+        )
+
+    return defense[["season", "week", "defense_team"] + DEFENSE_COLS]
+
 
 def _compute_rolling_features(df):
-    df = df.sort_values(["qb_id", "season", "week"]).reset_index(drop=True)
+    df = _add_rolling_features(df, group_col="qb_id", stat_cols=STAT_COLS)
 
-    for col in STAT_COLS:
-        # l3/l8 windows cross season boundaries: shift within qb_id only.
-        shifted = df.groupby("qb_id")[col].shift(1)
-
-        df[f"{col}_l3"] = (
-            shifted.groupby(df["qb_id"]).transform(lambda s: s.rolling(window=3, min_periods=1).mean())
-        )
-        df[f"{col}_l8"] = (
-            shifted.groupby(df["qb_id"]).transform(lambda s: s.rolling(window=8, min_periods=1).mean())
-        )
-
-        # Season-to-date resets each season: shift within (qb_id, season), so
-        # the first game of a season has no carryover from the prior season.
-        shifted_season = df.groupby(["qb_id", "season"])[col].shift(1)
-        df[f"{col}_std"] = (
-            shifted_season.groupby([df["qb_id"], df["season"]]).transform(lambda s: s.expanding().mean())
-        )
-
-    df["games_into_season"] = df.groupby(["qb_id", "season"]).cumcount()
+    player_stats = pd.read_parquet(RAW_DATA_DIR / "player_stats.parquet")
+    defense_table = _build_defense_table(player_stats)
+    df = df.merge(
+        defense_table.rename(columns={"defense_team": "opponent"}),
+        on=["season", "week", "opponent"],
+        how="left",
+    )
 
     return df
 
