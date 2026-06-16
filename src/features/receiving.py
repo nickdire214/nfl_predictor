@@ -7,6 +7,7 @@ player_stats receiving columns and the same schedule/team-game context
 used by the QB base table. No rolling features yet.
 """
 
+import numpy as np
 import pandas as pd
 
 from src.features.engineer import _build_team_game_view, _verify_spread_convention
@@ -30,6 +31,17 @@ RECEIVING_ROLLING_COLS = [
 ]
 
 SPINE_POSITIONS = ["WR", "TE", "RB"]
+
+
+def _canonical_position_map(players):
+    """gsis_id -> canonical position from players.parquet.
+
+    players.parquet has one row per gsis_id with a stable position label,
+    unlike snap_counts whose per-week position can flip on upstream
+    mislabels (e.g. Darren Waller tagged WR in 2025 wk13, TE otherwise).
+    """
+    valid = players.dropna(subset=["gsis_id"])
+    return valid.drop_duplicates("gsis_id").set_index("gsis_id")["position"]
 
 
 def _build_crosswalk(players, verbose=True):
@@ -86,7 +98,31 @@ def build_receiving_base(verbose=True):
     spine = spine[
         ["season", "week", "team", "opponent", "gsis_id", "player", "position",
          "offense_snaps", "offense_pct"]
-    ]
+    ].copy()
+
+    # Canonical position from players.parquet. The snap-table position decides
+    # spine inclusion (offensive snap as WR/TE/RB) but its per-week label flips
+    # on upstream mislabels, so the position value used downstream comes from
+    # the crosswalk; snap label is kept only as a fallback for gsis_ids absent
+    # from players.parquet.
+    canon = _canonical_position_map(players)
+    snap_position = spine["position"]
+    mapped = spine["gsis_id"].map(canon)
+    fallback_mask = mapped.isna()
+    spine["position"] = mapped.fillna(snap_position)
+
+    if verbose:
+        changed = ((spine["position"] != snap_position) & ~fallback_mask).sum()
+        print(
+            f"Canonical position: {fallback_mask.sum()} rows fell back to snap label "
+            f"({fallback_mask.sum() / len(spine):.4%}); "
+            f"{changed} (player, week) rows reclassified vs snap label"
+        )
+        print("Per-position rows (snap-sourced -> canonical):")
+        before = snap_position.value_counts()
+        after = spine["position"].value_counts()
+        for pos in sorted(set(before.index) | set(after.index)):
+            print(f"  {pos:<4} {before.get(pos, 0):>6} -> {after.get(pos, 0):>6}")
 
     stat_cols = RECEIVING_COUNT_COLS + RECEIVING_SHARE_COLS
     merged = spine.merge(
@@ -148,6 +184,89 @@ def build_receiving_base(verbose=True):
 def build_receiving_matrix(verbose=True):
     df = build_receiving_base(verbose=verbose)
     return add_rolling_features(df, group_col="gsis_id", stat_cols=RECEIVING_ROLLING_COLS)
+
+
+def build_receiving_prediction_features(season, week, line_overrides=None):
+    """Build feature rows for an upcoming week's receiving props.
+
+    Mirrors src.features.engineer.build_prediction_features: target-week
+    rows are constructed from schedules with all stat/label columns set to
+    NaN, concatenated with the historical receiving base restricted to
+    games strictly before (season, week), and run through the shared
+    roller (add_rolling_features, grouped by gsis_id). Only the
+    target-week rows are returned.
+
+    Player population for the target week: for each team scheduled in
+    (season, week), the full roster of WR/TE/RB pass-catchers from that
+    team's most recent prior game in the receiving spine (cross-season
+    allowed) -- the same "most recent prior" logic
+    src.models.predict.resolve_starters uses for the QB starter, applied
+    to a team's whole recent roster rather than a single player.
+
+    Snap-derived features (offense_pct rolling) come from history via the
+    roller; the target week's own snaps are unknown and stay NaN, feeding
+    into _l3/_l8/_std only through the shift (never the current row).
+
+    Position is sourced from build_receiving_base, which now resolves it
+    canonically from players.parquet, so this path and the training/matrix
+    path label position identically (no per-week snap-label flips).
+
+    line_overrides: optional dict {team: (spread_line, total_line)} for
+    when schedules hasn't populated lines for future games yet.
+    """
+    line_overrides = line_overrides or {}
+
+    schedules = pd.read_parquet(RAW_DATA_DIR / "schedules.parquet")
+    flip = _verify_spread_convention(schedules, verbose=False)
+    spread_sign = -1 if flip else 1
+
+    historical = build_receiving_base(verbose=False)
+    historical = historical[
+        (historical["season"] < season)
+        | ((historical["season"] == season) & (historical["week"] < week))
+    ]
+
+    target_sched = schedules[(schedules["season"] == season) & (schedules["week"] == week)]
+    target_games = _build_team_game_view(target_sched).drop(columns=["qb_id"])
+
+    for team, (spread_line, total_line) in line_overrides.items():
+        target_games.loc[target_games["team"] == team, "spread_line"] = spread_line
+        target_games.loc[target_games["team"] == team, "total_line"] = total_line
+
+    target_games["team_implied_total"] = np.where(
+        target_games["is_home"] == 1,
+        (target_games["total_line"] + spread_sign * target_games["spread_line"]) / 2,
+        (target_games["total_line"] - spread_sign * target_games["spread_line"]) / 2,
+    )
+
+    rosters = []
+    for team in target_games["team"].unique():
+        team_hist = historical[historical["team"] == team]
+        if team_hist.empty:
+            continue
+        last_season, last_week = (
+            team_hist[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).iloc[-1]
+        )
+        roster = team_hist[
+            (team_hist["season"] == last_season) & (team_hist["week"] == last_week)
+        ][["gsis_id", "player", "position"]].drop_duplicates().copy()
+        roster["team"] = team
+        rosters.append(roster)
+
+    if rosters:
+        roster_df = pd.concat(rosters, ignore_index=True)
+    else:
+        roster_df = pd.DataFrame(columns=["gsis_id", "player", "position", "team"])
+
+    target_rows = roster_df.merge(target_games, on="team", how="left")
+
+    for col in ["offense_snaps", "offense_pct"] + RECEIVING_COUNT_COLS + RECEIVING_SHARE_COLS:
+        target_rows[col] = float("nan")
+
+    combined = pd.concat([historical, target_rows], ignore_index=True, sort=False)
+    combined = add_rolling_features(combined, group_col="gsis_id", stat_cols=RECEIVING_ROLLING_COLS)
+
+    return combined[(combined["season"] == season) & (combined["week"] == week)]
 
 
 def main():

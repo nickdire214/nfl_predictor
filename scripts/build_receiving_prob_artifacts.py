@@ -37,6 +37,13 @@ SEASONS = [2022, 2023, 2024, 2025]
 N0 = 150
 PROP_MIN_TARGETS_L8 = 3
 N_QUINTILES = 5
+# The receiving model distinguishes only these positions (pos_WR/pos_TE dummies,
+# everything else encoded as the RB baseline). Canonical position (step 35) can
+# now surface a handful of FB/CB pass-catchers in the prop pool (e.g. Travis
+# Hunter); they stay in the matrix/training as baseline-encoded rows but are not
+# given their own sigma bins -- too few to estimate, and predict_receiving maps
+# any unmodeled position to the RB baseline.
+MODELED_POSITIONS = ["RB", "TE", "WR"]
 
 
 df = pd.read_parquet(FEATURES_DIR / "receiving_matrix.parquet")
@@ -82,6 +89,15 @@ for season in SEASONS:
 
 all_data = pd.concat(records, ignore_index=True)
 prop_data = all_data[all_data["targets_l8"] >= PROP_MIN_TARGETS_L8].copy()
+
+excluded = prop_data[~prop_data["position"].isin(MODELED_POSITIONS)]
+if len(excluded):
+    print(
+        f"Excluding {len(excluded)} prop-pool rows with unmodeled position "
+        f"(not in {MODELED_POSITIONS}) from sigma/z-pool fitting:"
+    )
+    print(excluded["position"].value_counts().to_string())
+prop_data = prop_data[prop_data["position"].isin(MODELED_POSITIONS)].copy()
 
 print(f"OOS prop-relevant pool (2022-2025): {len(prop_data)} rows")
 
