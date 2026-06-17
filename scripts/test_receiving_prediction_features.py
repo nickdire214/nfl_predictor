@@ -162,14 +162,20 @@ print("PASS: 2025 week 10 features identical with and without that week's own sn
 # --- (c) Forward sanity: a week with no games / no stats at all ---
 section("(c) Forward sanity: week with no games (2025 week 23)")
 
+# `as_of` is a prediction-time metadata column (not in receiving_matrix); the
+# column set must otherwise match the matrix exactly.
+METADATA_COLS = {"as_of"}
+
 future_df = build_receiving_prediction_features(2025, 23)
 
-assert list(future_df.columns) == list(receiving_matrix.columns), (
-    f"column mismatch: {set(future_df.columns) ^ set(receiving_matrix.columns)}"
+extra = set(future_df.columns) - set(receiving_matrix.columns)
+missing = set(receiving_matrix.columns) - set(future_df.columns)
+assert extra == METADATA_COLS and not missing, (
+    f"column mismatch: extra={extra} (expected {METADATA_COLS}), missing={missing}"
 )
 assert len(future_df) == 0, f"expected 0 rows for a non-existent week, got {len(future_df)}"
 print(f"PASS: build_receiving_prediction_features(2025, 23) ran without error, "
-      f"returned shape {future_df.shape} with matching columns")
+      f"returned shape {future_df.shape} with matching columns (+ {METADATA_COLS} metadata)")
 
 
 print("\nAll tests passed.")

@@ -210,7 +210,10 @@ def run_week_receiving(season, week, line_overrides=None, lines=None, label=None
         for p, pos in zip(calibrated_pred, positions)
     ])
 
-    result = features[["season", "week", "team", "opponent", "gsis_id", "player", "position"]].reset_index(drop=True).copy()
+    result = features[[
+        "season", "week", "team", "opponent", "gsis_id", "player", "position",
+        "team_implied_total", "as_of",
+    ]].reset_index(drop=True).copy()
     result["pred_receiving_yards"] = calibrated_pred
     for i, level in enumerate(QUANTILE_LEVELS):
         result[f"p{int(round(level * 100))}"] = quantiles[:, i]

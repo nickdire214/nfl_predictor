@@ -211,6 +211,11 @@ def build_receiving_prediction_features(season, week, line_overrides=None):
     canonically from players.parquet, so this path and the training/matrix
     path label position identically (no per-week snap-label flips).
 
+    Adds an `as_of` metadata column ("{season} wk{week:02d}") recording the
+    game each player's roster row was drawn from -- the receiving analogue of
+    the QB starter as_of, for roster-staleness review. It is metadata only
+    (not a model feature) and is NaN on the historical rows.
+
     line_overrides: optional dict {team: (spread_line, total_line)} for
     when schedules hasn't populated lines for future games yet.
     """
@@ -244,19 +249,21 @@ def build_receiving_prediction_features(season, week, line_overrides=None):
         team_hist = historical[historical["team"] == team]
         if team_hist.empty:
             continue
-        last_season, last_week = (
-            team_hist[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).iloc[-1]
-        )
+        last = team_hist[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).iloc[-1]
+        last_season, last_week = int(last["season"]), int(last["week"])
         roster = team_hist[
             (team_hist["season"] == last_season) & (team_hist["week"] == last_week)
         ][["gsis_id", "player", "position"]].drop_duplicates().copy()
         roster["team"] = team
+        # as_of: the game each player's roster row was drawn from (metadata only,
+        # not a model feature). Zero-padded week so the string sorts chronologically.
+        roster["as_of"] = f"{last_season} wk{last_week:02d}"
         rosters.append(roster)
 
     if rosters:
         roster_df = pd.concat(rosters, ignore_index=True)
     else:
-        roster_df = pd.DataFrame(columns=["gsis_id", "player", "position", "team"])
+        roster_df = pd.DataFrame(columns=["gsis_id", "player", "position", "team", "as_of"])
 
     target_rows = roster_df.merge(target_games, on="team", how="left")
 
