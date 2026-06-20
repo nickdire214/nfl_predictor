@@ -165,6 +165,88 @@ def build_rushing_matrix(verbose=True):
     return add_rolling_features(df, group_col="gsis_id", stat_cols=RUSHING_ROLLING_COLS)
 
 
+def build_rushing_prediction_features(season, week, line_overrides=None):
+    """Build feature rows for an upcoming week's RB rushing props.
+
+    Mirrors build_receiving_prediction_features: target-week rows are
+    constructed with all stat/label columns set to NaN, concatenated with the
+    historical rushing base restricted to games strictly before (season, week),
+    and run through the shared roller (add_rolling_features grouped by gsis_id
+    over RUSHING_ROLLING_COLS). Only the target-week rows are returned --
+    identical machinery to the training path, no duplicated rolling logic.
+
+    Player population: for each team scheduled in (season, week), the
+    canonical-RB roster from that team's most recent prior game in the rushing
+    spine (cross-season allowed -- the same "most recent prior" logic the
+    receiving builder uses, but RB-only, so one row per (team, gsis_id)).
+
+    carry_share / offense_pct rolling come from history via the roller; the
+    target week's own carries and snaps are unknown and stay NaN, feeding into
+    _l3/_l8/_std only through the shift (never the current game).
+
+    Carries an `as_of` metadata column ("{season} wk{week:02d}") recording the
+    game each player's roster row was drawn from (the receiving step-41
+    addition), for roster-staleness review. Metadata only, not a model feature;
+    NaN on the historical rows.
+
+    line_overrides: optional dict {team: (spread_line, total_line)} for when
+    schedules hasn't populated lines for future games yet.
+    """
+    line_overrides = line_overrides or {}
+
+    schedules = pd.read_parquet(RAW_DATA_DIR / "schedules.parquet")
+    flip = _verify_spread_convention(schedules, verbose=False)
+    spread_sign = -1 if flip else 1
+
+    historical = build_rushing_base(verbose=False)
+    historical = historical[
+        (historical["season"] < season)
+        | ((historical["season"] == season) & (historical["week"] < week))
+    ]
+
+    target_sched = schedules[(schedules["season"] == season) & (schedules["week"] == week)]
+    target_games = _build_team_game_view(target_sched).drop(columns=["qb_id"])
+
+    for team, (spread_line, total_line) in line_overrides.items():
+        target_games.loc[target_games["team"] == team, "spread_line"] = spread_line
+        target_games.loc[target_games["team"] == team, "total_line"] = total_line
+
+    target_games["team_implied_total"] = np.where(
+        target_games["is_home"] == 1,
+        (target_games["total_line"] + spread_sign * target_games["spread_line"]) / 2,
+        (target_games["total_line"] - spread_sign * target_games["spread_line"]) / 2,
+    )
+
+    rosters = []
+    for team in target_games["team"].unique():
+        team_hist = historical[historical["team"] == team]
+        if team_hist.empty:
+            continue
+        last = team_hist[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).iloc[-1]
+        last_season, last_week = int(last["season"]), int(last["week"])
+        roster = team_hist[
+            (team_hist["season"] == last_season) & (team_hist["week"] == last_week)
+        ][["gsis_id", "player", "position"]].drop_duplicates().copy()
+        roster["team"] = team
+        roster["as_of"] = f"{last_season} wk{last_week:02d}"
+        rosters.append(roster)
+
+    if rosters:
+        roster_df = pd.concat(rosters, ignore_index=True)
+    else:
+        roster_df = pd.DataFrame(columns=["gsis_id", "player", "position", "team", "as_of"])
+
+    target_rows = roster_df.merge(target_games, on="team", how="left")
+
+    for col in ["offense_snaps", "offense_pct", "carry_share"] + RUSHING_STAT_COLS:
+        target_rows[col] = float("nan")
+
+    combined = pd.concat([historical, target_rows], ignore_index=True, sort=False)
+    combined = add_rolling_features(combined, group_col="gsis_id", stat_cols=RUSHING_ROLLING_COLS)
+
+    return combined[(combined["season"] == season) & (combined["week"] == week)]
+
+
 def main():
     base_df = build_rushing_base()
 
