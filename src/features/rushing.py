@@ -20,7 +20,12 @@ import numpy as np
 import pandas as pd
 
 from src.features.engineer import _build_team_game_view, _verify_spread_convention
-from src.features.receiving import _build_crosswalk, _canonical_position_map
+from src.features.receiving import (
+    SNAP_LABEL_SYNONYMS,
+    _audit_snap_position_labels,
+    _build_crosswalk,
+    _canonical_position_map,
+)
 from src.features.rolling import add_rolling_features
 from src.ingestion._common import PROJECT_ROOT
 
@@ -46,47 +51,74 @@ RUSHING_ROLLING_COLS = [
 
 
 def _build_rb_spine(snap_counts, players, crosswalk, verbose=True):
-    """Canonical-RB player-game spine from snap_counts.
+    """Canonical-RB player-game spine, gated on CANONICAL position (step 54).
 
-    Population is snap-labeled RB rows with an offensive snap (the natural
-    RB candidate set, for a clean join-failure denominator); after mapping to
-    gsis_id, position is resolved canonically and the spine is narrowed to
-    canonical RBs.
+    Candidacy order is inverted relative to the original build: every
+    offensive-snap row is joined to the crosswalk and mapped to its canonical
+    position from players.parquet FIRST, and the RB gate is applied to that
+    canonical value. The per-week snap label gates only rows with no canonical
+    position available (no crosswalk match), normalized through
+    SNAP_LABEL_SYNONYMS.
+
+    The old order gated on `position == "RB"` before canonical position was
+    ever consulted, so the `HB` synonym excluded CIN's entire 2025 backfield
+    before the step-35 canonical fix could correct it -- see DECISIONS step 53.
     """
-    rb_snaps = snap_counts[
-        (snap_counts["position"] == "RB") & (snap_counts["offense_snaps"] > 0)
-    ].copy()
+    offensive = snap_counts[snap_counts["offense_snaps"] > 0].copy()
 
-    merged = rb_snaps.merge(crosswalk, left_on="pfr_player_id", right_on="pfr_id", how="left")
-
-    unmatched = merged["gsis_id"].isna()
-    rate = unmatched.mean()
     if verbose:
-        print(f"RB snap rows: {len(merged)}, unmatched to gsis_id: {int(unmatched.sum())} ({rate:.4%})")
+        _audit_snap_position_labels(offensive, verbose=verbose)
+
+    merged = offensive.merge(crosswalk, left_on="pfr_player_id", right_on="pfr_id", how="left")
+
+    canon = _canonical_position_map(players)
+    mapped = merged["gsis_id"].map(canon)
+    snap_label = merged["position"]
+    snap_label_norm = snap_label.replace(SNAP_LABEL_SYNONYMS)
+
+    # Canonical position where available, else the normalized snap label.
+    effective = mapped.fillna(snap_label_norm)
+    candidates = effective == "RB"
+
+    # Join-failure rate over RB CANDIDATES only, so the denominator stays
+    # comparable to the pre-step-54 build (not diluted by non-RB rows).
+    cand = merged[candidates]
+    unmatched = cand["gsis_id"].isna()
+    rate = unmatched.mean() if len(cand) else 0.0
+    if verbose:
+        print(f"RB candidate snap rows: {len(cand)}, unmatched to gsis_id: "
+              f"{int(unmatched.sum())} ({rate:.4%})")
         if rate > 0.02:
             print("  FLAG: join-failure rate exceeds ~2%. Unmatched examples:")
             print(
-                merged[unmatched][["season", "week", "team", "player", "pfr_player_id"]]
+                cand[unmatched][["season", "week", "team", "player", "pfr_player_id"]]
                 .drop_duplicates(subset=["player", "pfr_player_id"])
                 .head(10)
                 .to_string(index=False)
             )
 
-    matched = merged.dropna(subset=["gsis_id"]).drop(columns=["pfr_id"])
+    keep = candidates & merged["gsis_id"].notna()
 
-    # Canonical position (step 35): snap label decides candidacy, players.parquet
-    # decides the position value; narrow to canonical RBs.
-    canon = _canonical_position_map(players)
-    canon_pos = matched["gsis_id"].map(canon)
-    dropped = matched[(canon_pos != "RB") & canon_pos.notna()]
-    spine = matched[canon_pos == "RB"].copy()
+    if verbose:
+        # Delta vs the old snap-label gate (position == "RB", then drop unmatched).
+        old_keep = (snap_label == "RB") & merged["gsis_id"].notna()
+        added = keep & ~old_keep
+        removed = old_keep & ~keep
+        print(f"Candidacy inversion: +{int(added.sum())} rows admitted that the snap-label "
+              f"gate excluded, -{int(removed.sum())} rows excluded that it admitted "
+              f"(net {int(keep.sum()) - int(old_keep.sum()):+d})")
+        if added.any():
+            print("  admitted by snap label:")
+            print(merged[added]["position"].value_counts().rename("rows").to_string())
+        if removed.any():
+            print("  excluded (snap-labeled RB, non-RB canonical):")
+            print(merged[removed].assign(canon=effective[removed])[["player", "canon"]]
+                  .drop_duplicates().head(10).to_string(index=False))
+
+    spine = merged[keep].drop(columns=["pfr_id"]).copy()
     spine["position"] = "RB"
 
     if verbose:
-        print(f"snap-labeled RB rows reclassified to non-RB canonical (dropped): {len(dropped)}")
-        if len(dropped):
-            print(dropped.assign(canon=canon_pos[dropped.index])[["player", "canon"]]
-                  .drop_duplicates().head(10).to_string(index=False))
         print(f"canonical-RB spine rows: {len(spine)}")
 
     return spine

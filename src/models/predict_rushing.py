@@ -156,6 +156,10 @@ def run_week_rushing(season, week, line_overrides=None, lines=None, label=None, 
     `line_overrides`: optional dict {team: (spread_line, total_line)}.
     `lines`: optional dict {gsis_id: line} of sportsbook rushing-yards lines.
     `label`: optional filename suffix for non-canonical/test runs.
+
+    The saved log carries `carries_l8` alongside `team_implied_total` and
+    `as_of` so the prop slice (carries_l8 >= 8) is selectable directly from the
+    log without rejoining the matrix.
     """
     artifacts = load_artifacts()
 
@@ -204,9 +208,14 @@ def run_week_rushing(season, week, line_overrides=None, lines=None, label=None, 
     # Distribution: static quantile models (sorted on output).
     quantiles = np.atleast_2d(predict_quantiles(artifacts, features))
 
+    # carries_l8 is carried into the log as the prop-slice selector (the prop
+    # population is carries_l8 >= 8, per steps 46/51). It is already a model
+    # FEATURE_COL; surfacing it here is log metadata only -- no model change --
+    # and it lets a live log be filtered to the priced population without
+    # rejoining the rushing matrix.
     result = features[[
         "season", "week", "team", "opponent", "gsis_id", "player", "position",
-        "team_implied_total", "as_of",
+        "team_implied_total", "as_of", "carries_l8",
     ]].copy()
     result["pred_rushing_yards"] = calibrated_pred
     for i, level in enumerate(QUANTILE_LEVELS):

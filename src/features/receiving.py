@@ -32,6 +32,53 @@ RECEIVING_ROLLING_COLS = [
 
 SPINE_POSITIONS = ["WR", "TE", "RB"]
 
+# Every snap_counts.position label observed among offensive-snap rows in the
+# 2021-2025 data. The audit below flags anything outside this set: an
+# unrecognized label is how the step-53 `HB` defect hid (CIN's entire 2025
+# backfield was labeled HB, which the old exact-match candidacy gate silently
+# excluded from both spines, with no counter firing).
+KNOWN_SNAP_POSITIONS = {
+    # skill / offense
+    "QB", "RB", "HB", "FB", "WR", "TE",
+    # offensive line
+    "T", "G", "C", "OL",
+    # defensive (appear on offensive snaps in trick/goal-line packages)
+    "DE", "DT", "DL", "NT", "LB", "CB", "DB", "S", "FS", "SS",
+    # special teams
+    "K", "P", "LS",
+}
+
+# Snap-label synonyms for canonical positions. Applied ONLY when a row has no
+# canonical position available (no crosswalk match), so the snap label can
+# still gate candidacy sensibly. Canonical position from players.parquet is
+# always preferred when present.
+SNAP_LABEL_SYNONYMS = {"HB": "RB"}
+
+
+def _audit_snap_position_labels(offensive_snaps, verbose=True):
+    """Report the snap-label vocabulary and FLAG any unrecognized label.
+
+    `offensive_snaps` is the offense_snaps > 0 subset of snap_counts. This is
+    the counter whose absence let `HB` hide: candidacy used to be an exact
+    string match, so a synonym removed a whole position group silently.
+    """
+    counts = offensive_snaps["position"].value_counts(dropna=False)
+    if verbose:
+        print(f"Snap position labels among {len(offensive_snaps)} offensive-snap rows:")
+        print("  " + ", ".join(f"{pos}={n}" for pos, n in counts.items()))
+
+    unknown = [p for p in counts.index if pd.isna(p) or p not in KNOWN_SNAP_POSITIONS]
+    if unknown:
+        print("  FLAG: unrecognized snap position label(s) — these are excluded from")
+        print("        candidacy unless canonical position admits them. If any is a")
+        print("        skill-position synonym, add it to SNAP_LABEL_SYNONYMS:")
+        for pos in unknown:
+            print(f"          {pos!r}: {counts[pos]} rows")
+    elif verbose:
+        print("  OK: all labels recognized (no unknown synonyms)")
+
+    return unknown
+
 
 def _canonical_position_map(players):
     """gsis_id -> canonical position from players.parquet.
@@ -60,19 +107,68 @@ def _build_crosswalk(players, verbose=True):
     return crosswalk
 
 
-def _build_player_game_spine(snap_counts, crosswalk, verbose=True):
-    spine = snap_counts[
-        snap_counts["position"].isin(SPINE_POSITIONS) & (snap_counts["offense_snaps"] > 0)
-    ].copy()
+def _build_player_game_spine(snap_counts, players, crosswalk, verbose=True):
+    """WR/TE/RB player-game spine, UNION-gated on canonical + snap position.
 
-    merged = spine.merge(
+    Every offensive-snap row is joined to the crosswalk and mapped to its
+    canonical position from players.parquet, then admitted if EITHER that
+    canonical position OR the synonym-normalized snap label is in
+    SPINE_POSITIONS. Canonical position always supplies the position VALUE
+    (snap label is the value fallback only for crosswalk misses).
+
+    Two things are being preserved at once:
+
+    - Step 54 (canonical arm): the old build gated on the raw snap label
+      BEFORE canonical position was consulted, so an unrecognized synonym
+      (`HB`) excluded a player before the step-35 canonical fix could correct
+      him -- CIN's entire 2025 backfield vanished from the spine. See step 53.
+    - Step 24 (snap arm): players who take WR/TE/RB offensive snaps but are
+      canonically FB or CB (fullbacks, Travis Hunter) are deliberately kept in
+      the matrix as RB-baseline-encoded rows. A canonical-only gate would drop
+      them, so the union keeps step 54 purely additive. See step 55.
+    """
+    offensive = snap_counts[snap_counts["offense_snaps"] > 0].copy()
+
+    if verbose:
+        _audit_snap_position_labels(offensive, verbose=verbose)
+
+    merged = offensive.merge(
         crosswalk, left_on="pfr_player_id", right_on="pfr_id", how="left"
     )
 
-    unmatched = merged[merged["gsis_id"].isna()]
-    rate = len(unmatched) / len(merged)
+    canon = _canonical_position_map(players)
+    mapped = merged["gsis_id"].map(canon)
+    snap_label = merged["position"]
+    snap_label_norm = snap_label.replace(SNAP_LABEL_SYNONYMS)
+
+    # Canonical position where available, else the normalized snap label.
+    effective = mapped.fillna(snap_label_norm)
+
+    # UNION gate (step 55): admit if EITHER the canonical position OR the
+    # synonym-normalized snap label is a spine position. Canonical still
+    # supplies the position VALUE.
+    #
+    # The canonical arm is the step-54 HB fix (it admits players the snap label
+    # mislabels). The snap arm preserves step 24's deliberate inclusion of
+    # players who take WR/TE/RB offensive snaps but are canonically FB or CB
+    # (Travis Hunter, fullbacks) -- a canonical-only gate would have dropped
+    # them, retiring a documented population by side effect. They stay in the
+    # matrix carrying their canonical FB/CB position, RB-baseline-encoded by
+    # the model and excluded from per-position sigma fitting, exactly as
+    # step 24 specified. Union makes step 54 purely additive.
+    canonical_admits = mapped.isin(SPINE_POSITIONS)
+    snap_admits = snap_label_norm.isin(SPINE_POSITIONS)
+    candidates = canonical_admits | snap_admits
+
+    # Join-failure rate is reported over CANDIDATES only (skill-position rows),
+    # so the denominator stays comparable to the pre-step-54 build rather than
+    # being diluted by linemen, who are now in the input population.
+    cand = merged[candidates]
+    unmatched = cand[cand["gsis_id"].isna()]
+    rate = len(unmatched) / len(cand) if len(cand) else 0.0
     if verbose:
-        print(f"Snap rows: {len(merged)}, unmatched to gsis_id: {len(unmatched)} ({rate:.4%})")
+        print(f"Snap rows (WR/TE/RB candidates): {len(cand)}, "
+              f"unmatched to gsis_id: {len(unmatched)} ({rate:.4%})")
         if rate > 0.02:
             print("Unmatched examples:")
             print(
@@ -82,8 +178,59 @@ def _build_player_game_spine(snap_counts, crosswalk, verbose=True):
                 .to_string(index=False)
             )
 
-    matched = merged.dropna(subset=["gsis_id"]).drop(columns=["pfr_id"])
-    return matched
+    keep = candidates & merged["gsis_id"].notna()
+
+    if verbose:
+        # Delta vs the PRE-step-54 snap-label gate (raw snap label in
+        # SPINE_POSITIONS, then drop unmatched). The union gate must be a
+        # strict superset of it: `removed` is expected to be 0.
+        old_keep = snap_label.isin(SPINE_POSITIONS) & merged["gsis_id"].notna()
+        added = keep & ~old_keep
+        removed = old_keep & ~keep
+        print(f"Union candidacy vs pre-step-54 snap-label gate: "
+              f"+{int(added.sum())} admitted, -{int(removed.sum())} excluded "
+              f"(net {int(keep.sum()) - int(old_keep.sum()):+d})")
+        if removed.any():
+            print("  FLAG: the union gate should be purely additive — these rows regressed:")
+            print(merged[removed].assign(canonical=effective[removed])
+                  .groupby(["position", "canonical"]).size()
+                  .rename("rows").reset_index().to_string(index=False))
+        else:
+            print("  OK: purely additive — no row the old gate admitted was dropped")
+        if added.any():
+            print("  admitted by the canonical arm (snap label -> canonical):")
+            print(merged[added].assign(canonical=effective[added])
+                  .groupby(["position", "canonical"]).size()
+                  .rename("rows").reset_index().to_string(index=False))
+
+        # Rows the canonical arm alone would NOT have admitted -- i.e. step 24's
+        # FB/CB population, kept alive by the snap arm.
+        snap_only = keep & ~canonical_admits
+        print(f"  retained by the snap arm only (canonical outside SPINE_POSITIONS): "
+              f"{int(snap_only.sum())} rows")
+        if snap_only.any():
+            print(merged[snap_only].assign(canonical=effective[snap_only])
+                  .groupby(["position", "canonical"]).size()
+                  .rename("rows").reset_index().to_string(index=False))
+
+    spine = merged[keep].drop(columns=["pfr_id"]).copy()
+    spine["position"] = effective[keep]
+
+    if verbose:
+        fallback = mapped[keep].isna()
+        changed = (effective[keep] != snap_label[keep]) & ~fallback
+        print(
+            f"Canonical position: {int(fallback.sum())} rows fell back to snap label "
+            f"({fallback.mean():.4%}); "
+            f"{int(changed.sum())} (player, week) rows reclassified vs snap label"
+        )
+        print("Per-position rows (snap-sourced -> canonical):")
+        before = snap_label[keep].value_counts()
+        after = spine["position"].value_counts()
+        for pos in sorted(set(before.index) | set(after.index)):
+            print(f"  {pos:<4} {before.get(pos, 0):>6} -> {after.get(pos, 0):>6}")
+
+    return spine
 
 
 def build_receiving_base(verbose=True):
@@ -93,36 +240,14 @@ def build_receiving_base(verbose=True):
     schedules = pd.read_parquet(RAW_DATA_DIR / "schedules.parquet")
 
     crosswalk = _build_crosswalk(players, verbose=verbose)
-    spine = _build_player_game_spine(snap_counts, crosswalk, verbose=verbose)
+    # Candidacy + canonical position are both resolved inside the spine builder
+    # (step 54): position is already canonical on return.
+    spine = _build_player_game_spine(snap_counts, players, crosswalk, verbose=verbose)
 
     spine = spine[
         ["season", "week", "team", "opponent", "gsis_id", "player", "position",
          "offense_snaps", "offense_pct"]
     ].copy()
-
-    # Canonical position from players.parquet. The snap-table position decides
-    # spine inclusion (offensive snap as WR/TE/RB) but its per-week label flips
-    # on upstream mislabels, so the position value used downstream comes from
-    # the crosswalk; snap label is kept only as a fallback for gsis_ids absent
-    # from players.parquet.
-    canon = _canonical_position_map(players)
-    snap_position = spine["position"]
-    mapped = spine["gsis_id"].map(canon)
-    fallback_mask = mapped.isna()
-    spine["position"] = mapped.fillna(snap_position)
-
-    if verbose:
-        changed = ((spine["position"] != snap_position) & ~fallback_mask).sum()
-        print(
-            f"Canonical position: {fallback_mask.sum()} rows fell back to snap label "
-            f"({fallback_mask.sum() / len(spine):.4%}); "
-            f"{changed} (player, week) rows reclassified vs snap label"
-        )
-        print("Per-position rows (snap-sourced -> canonical):")
-        before = snap_position.value_counts()
-        after = spine["position"].value_counts()
-        for pos in sorted(set(before.index) | set(after.index)):
-            print(f"  {pos:<4} {before.get(pos, 0):>6} -> {after.get(pos, 0):>6}")
 
     stat_cols = RECEIVING_COUNT_COLS + RECEIVING_SHARE_COLS
     merged = spine.merge(
