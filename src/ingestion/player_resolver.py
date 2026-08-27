@@ -156,3 +156,110 @@ def resolve_prop_lines(lines_df, season, week):
             print(f"    [{row['team']}] \"{row['book_name']}\" — top: {cand_str}")
 
     return out
+
+
+def resolve_player_event(book_name, home_team, away_team, candidate_pool):
+    """Resolve a book name when only the EVENT's two teams are known.
+
+    The per-event prop endpoint carries no per-player team attribution (step
+    58), so the candidate scope is both teams. Rather than widening
+    resolve_player's scope -- which would silently halve the protection that
+    team-scoping provides -- this runs the UNCHANGED resolve_player once per
+    team and arbitrates:
+
+      - exactly one team resolves  -> take it, and record resolved_team
+      - both teams resolve         -> method "ambiguous_both_teams",
+                                      gsis_id None, both candidates logged
+      - neither resolves           -> method "unresolved", candidates from
+                                      both teams merged for the log
+
+    A name that legitimately matches a player on each side of the same game
+    is exactly the case that must NOT be guessed, so it gets its own method
+    rather than being folded into "unresolved".
+    """
+    per_team = {}
+    for team in (home_team, away_team):
+        if team is None:
+            continue
+        per_team[team] = resolve_player(book_name, team, candidate_pool)
+
+    hits = {t: r for t, r in per_team.items() if r["method"] in ("exact", "fuzzy")}
+
+    if len(hits) == 1:
+        team, res = next(iter(hits.items()))
+        return {**res, "resolved_team": team, "team_candidates": per_team}
+
+    if len(hits) > 1:
+        cands = [(t, r["name"], round(r["score"], 3) if r["score"] else None)
+                 for t, r in hits.items()]
+        return {
+            "gsis_id": None, "name": None, "method": "ambiguous_both_teams",
+            "score": None, "candidates": cands, "resolved_team": None,
+            "team_candidates": per_team,
+        }
+
+    merged = []
+    for t, r in per_team.items():
+        merged.extend((f"{t}:{n}", s) for n, s in r["candidates"])
+    merged.sort(key=lambda x: x[1], reverse=True)
+    best = max((r["score"] for r in per_team.values() if r["score"] is not None), default=None)
+    return {
+        "gsis_id": None, "name": None, "method": "unresolved",
+        "score": best, "candidates": merged[:4], "resolved_team": None,
+        "team_candidates": per_team,
+    }
+
+
+def resolve_prop_lines_event(consensus_df, season, week):
+    """Resolve event-scoped consensus prop rows for (season, week).
+
+    `consensus_df` is consensus_prop_lines output (carries home_team and
+    away_team but no per-player team). Returns it augmented with gsis_id /
+    resolved_name / resolved_team / method / score, and prints a report:
+    counts by method, every fuzzy match, every ambiguous-both-teams case, and
+    every unresolved name with its top candidates from BOTH teams.
+    """
+    pool = build_candidate_pool(season, week)
+
+    results = [
+        resolve_player_event(row["book_name"], row["home_team"], row["away_team"], pool)
+        for _, row in consensus_df.iterrows()
+    ]
+
+    out = consensus_df.copy().reset_index(drop=True)
+    out["gsis_id"] = [r["gsis_id"] for r in results]
+    out["resolved_name"] = [r["name"] for r in results]
+    out["resolved_team"] = [r["resolved_team"] for r in results]
+    out["method"] = [r["method"] for r in results]
+    out["score"] = [r["score"] for r in results]
+
+    counts = out["method"].value_counts()
+    print(f"Event-scoped resolution report ({season} wk{week}, {len(out)} prop rows):")
+    for method in ("exact", "fuzzy", "ambiguous_both_teams", "unresolved"):
+        print(f"  {method:<21} {int(counts.get(method, 0))}")
+
+    fuzzy = out[out["method"] == "fuzzy"]
+    if len(fuzzy):
+        print("\n  Fuzzy matches (verify):")
+        for _, r in fuzzy.iterrows():
+            print(f"    [{r['resolved_team']}] \"{r['book_name']}\" ({r['market']}) -> "
+                  f"{r['resolved_name']} (score {r['score']:.3f})")
+    else:
+        print("\n  Fuzzy matches: none — every resolved name matched exactly.")
+
+    for row, res in zip(consensus_df.to_dict("records"), results):
+        if res["method"] == "ambiguous_both_teams":
+            cand_str = ", ".join(f"{t}:{n} ({s})" for t, n, s in res["candidates"])
+            print(f"\n  AMBIGUOUS (both teams matched) \"{row['book_name']}\" "
+                  f"({row['market']}) — {cand_str}")
+
+    unresolved = [(row, res) for row, res in zip(consensus_df.to_dict("records"), results)
+                  if res["method"] == "unresolved"]
+    if unresolved:
+        print("\n  Unresolved:")
+        for row, res in unresolved:
+            cand_str = ", ".join(f"{n} ({s})" for n, s in res["candidates"]) or "no candidates"
+            print(f"    \"{row['book_name']}\" ({row['market']}) "
+                  f"[{row['home_team']}/{row['away_team']}] — top: {cand_str}")
+
+    return out

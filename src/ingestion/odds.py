@@ -5,6 +5,7 @@ matches events to nflverse schedules, and persists raw bulk snapshots as
 parquet in data/raw/odds/. The API key is read from .env and never printed.
 """
 
+import json
 import os
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
@@ -222,6 +223,147 @@ def fetch_game_lines(snapshot_label):
     print(f"  saved to: {out_path}")
 
     return lines_df
+
+
+def fetch_event_props(event_id, markets, regions="us", save_raw=True):
+    """Fetch player-prop odds for ONE event (per-event odds endpoint).
+
+    Thin reconnaissance wrapper on
+    /v4/sports/{sport}/events/{event_id}/odds — deliberately NOT a parser:
+    it returns the decoded JSON exactly as the API sent it, so the payload
+    shape can be inspected before any normalization is designed.
+
+    Player props are only available on the per-event endpoint (they are not
+    returned by the bulk /odds route used by fetch_game_lines), and they are
+    priced per event per market, so cost is measured empirically from the
+    quota headers rather than assumed.
+
+    `markets`: comma-separated market keys, e.g.
+        "player_pass_yds,player_reception_yds,player_rush_yds"
+    `save_raw`: write the untouched payload to
+        data/raw/odds/props_raw_{event_id}_{YYYY-MM-DD}.json
+
+    Returns (payload, headers) where headers carries the quota fields.
+    """
+    resp = requests.get(
+        f"{BASE_URL}/sports/{SPORT_KEY}/events/{event_id}/odds",
+        params={
+            "apiKey": API_KEY,
+            "regions": regions,
+            "markets": markets,
+            "oddsFormat": "american",
+        },
+    )
+    resp.raise_for_status()
+
+    print(f"\nfetch_event_props({event_id}): HTTP {resp.status_code}")
+    print(f"  markets requested: {markets}")
+    print(f"  x-requests-remaining: {resp.headers.get('x-requests-remaining')}")
+    print(f"  x-requests-used: {resp.headers.get('x-requests-used')}")
+    print(f"  x-requests-last: {resp.headers.get('x-requests-last')}")
+
+    payload = resp.json()
+
+    if save_raw:
+        ODDS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = ODDS_DATA_DIR / f"props_raw_{event_id}_{date.today().isoformat()}.json"
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"  saved raw JSON to: {out_path}")
+
+    return payload, dict(resp.headers)
+
+
+def parse_event_props(raw_json):
+    """Flatten a per-event player-prop payload into a long-form frame.
+
+    One row per (bookmaker, market, player, side). Columns:
+        event_id, home_team, away_team (nflverse abbreviations),
+        bookmaker, market, book_name, side, line, price, last_update
+
+    `book_name` comes from the outcome's `description` field and `side` from
+    its `name` field -- the endpoint carries the PLAYER in `description` and
+    Over/Under in `name`, the opposite of the game-lines endpoint where `name`
+    is the team or Over/Under. No normalization happens here: book_name is
+    passed through verbatim for the resolver to handle.
+
+    NOTE: the payload carries NO per-player team attribution (see step 58) --
+    team is only known at event level, hence both home_team and away_team on
+    every row. Event-scoped resolution is the resolver's problem, not this
+    function's.
+
+    A missing `bookmakers` key, a bookmaker with no `markets`, a market with
+    no `outcomes`, or an outcome missing fields all degrade to fewer rows /
+    None values rather than raising.
+    """
+    event_id = raw_json.get("id")
+    home_team = TEAM_NAME_MAP.get(raw_json.get("home_team"))
+    away_team = TEAM_NAME_MAP.get(raw_json.get("away_team"))
+
+    rows = []
+    for bookmaker in raw_json.get("bookmakers") or []:
+        for market in bookmaker.get("markets") or []:
+            for outcome in market.get("outcomes") or []:
+                rows.append({
+                    "event_id": event_id,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "bookmaker": bookmaker.get("key"),
+                    "market": market.get("key"),
+                    "book_name": outcome.get("description"),
+                    "side": outcome.get("name"),
+                    "line": outcome.get("point"),
+                    "price": outcome.get("price"),
+                    "last_update": market.get("last_update"),
+                })
+
+    columns = ["event_id", "home_team", "away_team", "bookmaker", "market",
+               "book_name", "side", "line", "price", "last_update"]
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows)[columns]
+
+
+def consensus_prop_lines(props_df):
+    """Collapse a parsed prop frame to one row per (market, book_name).
+
+    Mirrors consensus_game_lines: median across bookmakers, plus n_books so
+    thin coverage is auditable. Over and Under prices stay SEPARATE (a prop's
+    two sides are priced independently and are not interchangeable).
+
+    Returns columns: event_id, home_team, away_team, market, book_name,
+        line (median across all rows for the pair), n_books,
+        over_price / under_price (median per side), last_update (max).
+
+    The line is medianed across every (bookmaker, side) row for the pair --
+    Over and Under of the same prop share one line, so this is a median over
+    books, not a blend of two different quantities.
+    """
+    columns = ["event_id", "home_team", "away_team", "market", "book_name",
+               "line", "n_books", "over_price", "under_price", "last_update"]
+    if props_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    def _side_price(group, side):
+        vals = group.loc[group["side"] == side, "price"]
+        return vals.median() if len(vals) else None
+
+    records = []
+    for (market, book_name), g in props_df.groupby(["market", "book_name"], sort=True):
+        records.append({
+            "event_id": g["event_id"].iloc[0],
+            "home_team": g["home_team"].iloc[0],
+            "away_team": g["away_team"].iloc[0],
+            "market": market,
+            "book_name": book_name,
+            "line": g["line"].median(),
+            "n_books": g["bookmaker"].nunique(),
+            "over_price": _side_price(g, "Over"),
+            "under_price": _side_price(g, "Under"),
+            "last_update": g["last_update"].max(),
+        })
+
+    return pd.DataFrame(records)[columns]
 
 
 def consensus_game_lines(lines_df):

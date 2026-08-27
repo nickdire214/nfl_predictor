@@ -21,10 +21,14 @@ import pandas as pd
 
 from src.features.engineer import _build_team_game_view, _verify_spread_convention
 from src.features.receiving import (
+    ROSTER_WINDOW_GAMES,
     SNAP_LABEL_SYNONYMS,
+    _apply_latest_team,
     _audit_snap_position_labels,
     _build_crosswalk,
+    _build_window_roster,
     _canonical_position_map,
+    _latest_team_is_authoritative,
 )
 from src.features.rolling import add_rolling_features
 from src.ingestion._common import PROJECT_ROOT
@@ -197,7 +201,10 @@ def build_rushing_matrix(verbose=True):
     return add_rolling_features(df, group_col="gsis_id", stat_cols=RUSHING_ROLLING_COLS)
 
 
-def build_rushing_prediction_features(season, week, line_overrides=None):
+def build_rushing_prediction_features(
+    season, week, line_overrides=None,
+    roster_window=ROSTER_WINDOW_GAMES, apply_latest_team=None, verbose=False,
+):
     """Build feature rows for an upcoming week's RB rushing props.
 
     Mirrors build_receiving_prediction_features: target-week rows are
@@ -207,10 +214,14 @@ def build_rushing_prediction_features(season, week, line_overrides=None):
     over RUSHING_ROLLING_COLS). Only the target-week rows are returned --
     identical machinery to the training path, no duplicated rolling logic.
 
-    Player population: for each team scheduled in (season, week), the
-    canonical-RB roster from that team's most recent prior game in the rushing
-    spine (cross-season allowed -- the same "most recent prior" logic the
-    receiving builder uses, but RB-only, so one row per (team, gsis_id)).
+    Player population (step 61): every canonical RB with an offensive snap for
+    that team across its last `roster_window` prior games (default
+    ROSTER_WINDOW_GAMES=4, cross-season allowed), then -- when latest_team is
+    authoritative for `season` -- reassigned to players.parquet's latest_team
+    and filtered by status. Both changes are PREDICTION-TIME ONLY and default
+    off for any season the crosswalk does not describe, so historical replay
+    is untouched. Pass roster_window=1, apply_latest_team=False to reproduce
+    the pre-step-61 board.
 
     carry_share / offense_pct rolling come from history via the roller; the
     target week's own carries and snaps are unknown and stay NaN, feeding into
@@ -249,24 +260,14 @@ def build_rushing_prediction_features(season, week, line_overrides=None):
         (target_games["total_line"] - spread_sign * target_games["spread_line"]) / 2,
     )
 
-    rosters = []
-    for team in target_games["team"].unique():
-        team_hist = historical[historical["team"] == team]
-        if team_hist.empty:
-            continue
-        last = team_hist[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).iloc[-1]
-        last_season, last_week = int(last["season"]), int(last["week"])
-        roster = team_hist[
-            (team_hist["season"] == last_season) & (team_hist["week"] == last_week)
-        ][["gsis_id", "player", "position"]].drop_duplicates().copy()
-        roster["team"] = team
-        roster["as_of"] = f"{last_season} wk{last_week:02d}"
-        rosters.append(roster)
+    target_teams = target_games["team"].unique()
+    roster_df = _build_window_roster(historical, target_teams, window=roster_window)
 
-    if rosters:
-        roster_df = pd.concat(rosters, ignore_index=True)
-    else:
-        roster_df = pd.DataFrame(columns=["gsis_id", "player", "position", "team", "as_of"])
+    players = pd.read_parquet(RAW_DATA_DIR / "players.parquet")
+    if apply_latest_team is None:
+        apply_latest_team = _latest_team_is_authoritative(players, season)
+    if apply_latest_team:
+        roster_df = _apply_latest_team(roster_df, players, target_teams, verbose=verbose)
 
     target_rows = roster_df.merge(target_games, on="team", how="left")
 

@@ -80,6 +80,133 @@ def _audit_snap_position_labels(offensive_snaps, verbose=True):
     return unknown
 
 
+# --- Prediction-time roster resolution (step 61) -----------------------------
+# Both defects fixed here are PREDICTION-TIME ONLY. Historical rows and the
+# training path never see either of these: build_*_base and the matrices are
+# untouched, so a 2021 Packers game stays a Packers game forever.
+
+# Defect B: how many of a team's most recent games contribute to its predicted
+# roster. N=1 (the original behaviour) drops any starter who missed that one
+# game -- season-ending injuries made Malik Nabers, Breece Hall, Brock Bowers
+# et al. invisible on the entire 2026 wk1 board despite correct team labels.
+ROSTER_WINDOW_GAMES = 4
+
+# Defect A: players.parquet `status` values that count as "actually playing".
+# CUT / RES / NWT / RSN are excluded because the step-60 diagnostic showed they
+# retain a latest_team 100% of the time (CUT 59/59, RES 96/96), so latest_team
+# alone cannot distinguish a rostered player from a released one -- status is
+# the only discriminator.
+ALLOWED_ROSTER_STATUS = {"ACT", "PUP"}
+
+
+def _build_window_roster(historical, teams, window=ROSTER_WINDOW_GAMES):
+    """Roster = anyone with an offensive snap for `team` in its last `window` games.
+
+    `historical` is a spine already restricted to games strictly before the
+    target week. For each team we take its last `window` distinct team-games
+    (cross-season allowed, same as the original most-recent-game logic) and
+    admit every player appearing in any of them.
+
+    `as_of` remains the PLAYER'S OWN most recent game inside that window, not
+    the team's -- so it still reads as a staleness signal per player rather
+    than collapsing to one value per team.
+    """
+    rosters = []
+    for team in teams:
+        team_hist = historical[historical["team"] == team]
+        if team_hist.empty:
+            continue
+
+        games = (
+            team_hist[["season", "week"]]
+            .drop_duplicates()
+            .sort_values(["season", "week"])
+            .tail(window)
+        )
+        keys = {(int(s), int(w)) for s, w in zip(games["season"], games["week"])}
+
+        in_window = team_hist[
+            [(int(s), int(w)) in keys
+             for s, w in zip(team_hist["season"], team_hist["week"])]
+        ]
+        if in_window.empty:
+            continue
+
+        # each player's own latest game in the window supplies as_of
+        newest = (
+            in_window.sort_values(["season", "week"])
+            .drop_duplicates(subset="gsis_id", keep="last")
+        )
+        roster = newest[["gsis_id", "player", "position", "season", "week"]].copy()
+        roster["team"] = team
+        roster["as_of"] = [
+            f"{int(s)} wk{int(w):02d}" for s, w in zip(roster["season"], roster["week"])
+        ]
+        rosters.append(roster.drop(columns=["season", "week"]))
+
+    if not rosters:
+        return pd.DataFrame(columns=["gsis_id", "player", "position", "team", "as_of"])
+    return pd.concat(rosters, ignore_index=True)
+
+
+def _latest_team_is_authoritative(players, season):
+    """Is players.parquet's latest_team valid as the team authority for `season`?
+
+    latest_team describes the CURRENT roster snapshot, so it is only meaningful
+    when the season being predicted is the season the crosswalk describes.
+    Predicting 2025 from a 2026 crosswalk must NOT relabel anyone -- that would
+    push 2026 teams onto historical replays and break replay equivalence.
+
+    Self-adjusting: once the pull advances to 2027, 2027 becomes authoritative.
+    """
+    return int(players["last_season"].max()) == int(season)
+
+
+def _apply_latest_team(roster_df, players, valid_teams, verbose=False):
+    """Reassign predicted-roster players to players.parquet `latest_team`.
+
+    PREDICTION-TIME ONLY -- callers gate on _latest_team_is_authoritative.
+
+    Three filters, in order:
+      1. status must be in ALLOWED_ROSTER_STATUS, else the player is dropped
+         (a released/reserve player is not playing this week at all)
+      2. team becomes latest_team
+      3. latest_team must be one of the teams playing this week, else dropped
+
+    A player appearing in two teams' windows (mid-season trade) collapses to
+    one row on his latest_team, keeping his freshest as_of.
+    """
+    if roster_df.empty:
+        return roster_df
+
+    pmap = players.drop_duplicates("gsis_id").set_index("gsis_id")
+    out = roster_df.copy()
+    out["_status"] = out["gsis_id"].map(pmap["status"])
+    out["_latest_team"] = out["gsis_id"].map(pmap["latest_team"])
+
+    bad_status = ~out["_status"].isin(ALLOWED_ROSTER_STATUS)
+    dropped_status = out[bad_status]
+    out = out[~bad_status]
+
+    out["team"] = out["_latest_team"]
+
+    off_slate = ~out["team"].isin(set(valid_teams))
+    dropped_team = out[off_slate]
+    out = out[~off_slate]
+
+    # trade collapse: one row per player, freshest as_of wins
+    out = out.sort_values("as_of").drop_duplicates(subset="gsis_id", keep="last")
+
+    if verbose:
+        print(f"  latest_team override: {len(roster_df)} -> {len(out)} rows")
+        print(f"    dropped, status not in {sorted(ALLOWED_ROSTER_STATUS)}: {len(dropped_status)}")
+        if len(dropped_status):
+            print(dropped_status.groupby("_status").size().rename("rows").to_string())
+        print(f"    dropped, latest_team not on this week's slate: {len(dropped_team)}")
+
+    return out.drop(columns=["_status", "_latest_team"]).reset_index(drop=True)
+
+
 def _canonical_position_map(players):
     """gsis_id -> canonical position from players.parquet.
 
@@ -311,7 +438,10 @@ def build_receiving_matrix(verbose=True):
     return add_rolling_features(df, group_col="gsis_id", stat_cols=RECEIVING_ROLLING_COLS)
 
 
-def build_receiving_prediction_features(season, week, line_overrides=None):
+def build_receiving_prediction_features(
+    season, week, line_overrides=None,
+    roster_window=ROSTER_WINDOW_GAMES, apply_latest_team=None, verbose=False,
+):
     """Build feature rows for an upcoming week's receiving props.
 
     Mirrors src.features.engineer.build_prediction_features: target-week
@@ -321,12 +451,19 @@ def build_receiving_prediction_features(season, week, line_overrides=None):
     roller (add_rolling_features, grouped by gsis_id). Only the
     target-week rows are returned.
 
-    Player population for the target week: for each team scheduled in
-    (season, week), the full roster of WR/TE/RB pass-catchers from that
-    team's most recent prior game in the receiving spine (cross-season
-    allowed) -- the same "most recent prior" logic
-    src.models.predict.resolve_starters uses for the QB starter, applied
-    to a team's whole recent roster rather than a single player.
+    Player population for the target week (step 61): every WR/TE/RB with an
+    offensive snap for that team across its last `roster_window` prior games
+    (default ROSTER_WINDOW_GAMES=4, cross-season allowed), then -- when
+    latest_team is authoritative for `season` -- reassigned to
+    players.parquet's latest_team and filtered by status. A one-game window
+    silently dropped every starter who missed that specific game.
+
+    Both roster changes are PREDICTION-TIME ONLY. `apply_latest_team` defaults
+    to _latest_team_is_authoritative(players, season), which is False whenever
+    the target season is not the season the crosswalk describes -- so a 2025
+    replay is untouched and replay equivalence is structurally preserved.
+    Pass roster_window=1, apply_latest_team=False to reproduce the pre-step-61
+    board exactly.
 
     Snap-derived features (offense_pct rolling) come from history via the
     roller; the target week's own snaps are unknown and stay NaN, feeding
@@ -369,26 +506,14 @@ def build_receiving_prediction_features(season, week, line_overrides=None):
         (target_games["total_line"] - spread_sign * target_games["spread_line"]) / 2,
     )
 
-    rosters = []
-    for team in target_games["team"].unique():
-        team_hist = historical[historical["team"] == team]
-        if team_hist.empty:
-            continue
-        last = team_hist[["season", "week"]].drop_duplicates().sort_values(["season", "week"]).iloc[-1]
-        last_season, last_week = int(last["season"]), int(last["week"])
-        roster = team_hist[
-            (team_hist["season"] == last_season) & (team_hist["week"] == last_week)
-        ][["gsis_id", "player", "position"]].drop_duplicates().copy()
-        roster["team"] = team
-        # as_of: the game each player's roster row was drawn from (metadata only,
-        # not a model feature). Zero-padded week so the string sorts chronologically.
-        roster["as_of"] = f"{last_season} wk{last_week:02d}"
-        rosters.append(roster)
+    target_teams = target_games["team"].unique()
+    roster_df = _build_window_roster(historical, target_teams, window=roster_window)
 
-    if rosters:
-        roster_df = pd.concat(rosters, ignore_index=True)
-    else:
-        roster_df = pd.DataFrame(columns=["gsis_id", "player", "position", "team", "as_of"])
+    players = pd.read_parquet(RAW_DATA_DIR / "players.parquet")
+    if apply_latest_team is None:
+        apply_latest_team = _latest_team_is_authoritative(players, season)
+    if apply_latest_team:
+        roster_df = _apply_latest_team(roster_df, players, target_teams, verbose=verbose)
 
     target_rows = roster_df.merge(target_games, on="team", how="left")
 
