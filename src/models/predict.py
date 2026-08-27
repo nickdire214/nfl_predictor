@@ -33,6 +33,23 @@ RESIDUAL_POOL_PATH = MODELS_DIR / "qb_residual_pool.npy"
 N0 = 150
 QUANTILE_LEVELS = (0.1, 0.25, 0.5, 0.75, 0.9)
 
+# How many of a team's most recent games vote on its default starting QB.
+#
+# REVERTED TO 1 (step 67 follow-up). N=4 was tried and rejected on evidence:
+# it changed only 2 of 32 teams on the 2026 wk1 board (one of them a
+# regression to a QB who is out of the league), and it lagged every measured
+# mid-season starter change by an extra game with worse post-switch accuracy.
+# The 8-team week-1 mismatch is NOT a resolution-rule defect -- it is an
+# offseason-information gap that no rule derived from 2025 data can close --
+# and it is handled by starters_override.csv. N=1 is exactly the
+# most-recent-prior-start rule; the modal machinery below degenerates to it.
+STARTER_WINDOW_GAMES = 1
+
+# starters_override.csv player_name value meaning "this team's starter is
+# genuinely undecided — drop the team rather than guess" (step 69A).
+# Matched case-insensitively.
+SKIP_SENTINEL = "SKIP"
+
 
 def load_residual_pool(path=RESIDUAL_POOL_PATH):
     """Load the pooled, mean-centered out-of-sample residuals."""
@@ -76,16 +93,43 @@ def predict_quantiles(calibrated_pred, residual_pool, levels=(0.1, 0.25, 0.5, 0.
 def resolve_starters(season, week):
     """Resolve each team's starting QB for (season, week).
 
-    Default: each team's most recent prior starter, taken from
-    qb_matrix.parquet history strictly before (season, week).
-    Cross-season carryover is allowed (e.g. week-1 default starters
-    come from the prior season's last game).
+    Default: each team's MOST FREQUENT starter across its last
+    STARTER_WINDOW_GAMES prior games, ties broken by most recent start.
+    History comes from qb_matrix.parquet strictly before (season, week);
+    cross-season carryover is allowed (week-1 defaults come from the prior
+    season's closing games).
+
+    STARTER_WINDOW_GAMES is 1, so in practice this is the most-recent-prior-
+    start rule and the modal machinery degenerates to it. A 4-game window was
+    tried in step 67 and reverted on evidence (see DECISIONS): it did not fix
+    the week-1 mismatch, because the 2026 cases are sustained multi-game
+    handovers rather than one-off rest starts, and it lagged genuine
+    mid-season changes by an extra game.
+
+    The week-1 mismatch is an OFFSEASON-INFORMATION gap, not a rule defect:
+    who starts in September is not derivable from 2025 data by any rule.
+    Correct it with starters_override.csv, which for week 1 is expected to be
+    populated rather than empty.
+
+    The summary's `window_starts` column reports how contested the window was
+    (at N=1 it is always "1/1", which is itself the signal that the default
+    rests on a single game).
 
     Overrides: if data/predictions/starters_override.csv exists, rows
     matching (season, week) override the default starter for that team.
     Override `player_name` values are resolved against players.parquet
     (position == "QB") by exact display_name match; an unknown or
-    ambiguous name raises a ValueError listing the candidates.
+    ambiguous name raises a ValueError listing the candidates, and a name
+    with NO qb_matrix history before (season, week) also raises rather than
+    producing all-NaN rolling features (step 69B).
+
+    player_name = "SKIP" (case-insensitive) drops the team from the board:
+    it is omitted from the returned `starters` dict but appears in `summary`
+    with source="skip" and a null qb_id, so a short board is visible rather
+    than silent. SKIP is the intended handling for a genuinely undecided
+    starting job — the choice between two plausible QBs turns on front-office
+    decisions (contract money, a veteran's decline, commitment to a young
+    starter) that are not derivable from passing statistics.
 
     Returns (starters, summary): `starters` is {team: gsis_id};
     `summary` is a printable DataFrame with one row per team showing
@@ -101,14 +145,26 @@ def resolve_starters(season, week):
 
     for team in sorted(history["team"].unique()):
         team_hist = history[history["team"] == team].sort_values(["season", "week"])
-        last = team_hist.iloc[-1]
-        starters[team] = last["qb_id"]
+        window = team_hist.tail(STARTER_WINDOW_GAMES)
+
+        # modal starter in the window; ties -> the one who started most recently
+        counts = window.groupby("qb_id").size()
+        top = counts.max()
+        tied = set(counts[counts == top].index)
+        # window is chronological, so the last tied appearance is the most recent
+        chosen = window[window["qb_id"].isin(tied)].iloc[-1]["qb_id"]
+
+        # as_of: that QB's most recent start inside the window
+        last_start = window[window["qb_id"] == chosen].iloc[-1]
+
+        starters[team] = chosen
         summary_rows.append({
             "team": team,
-            "qb_id": last["qb_id"],
-            "qb_name": last["player_display_name"],
+            "qb_id": chosen,
+            "qb_name": last_start["player_display_name"],
             "source": "default",
-            "as_of": f"{int(last['season'])} wk{int(last['week'])}",
+            "as_of": f"{int(last_start['season'])} wk{int(last_start['week'])}",
+            "window_starts": f"{int(counts[chosen])}/{len(window)}",
         })
 
     override_path = PREDICTIONS_DIR / "starters_override.csv"
@@ -122,6 +178,23 @@ def resolve_starters(season, week):
 
             for _, row in overrides.iterrows():
                 team, name = row["team"], row["player_name"]
+
+                # SKIP sentinel (step 69A): the job is genuinely undecided, so
+                # drop the team rather than guess. The team is omitted from the
+                # returned dict entirely but stays VISIBLE in the summary with
+                # source="skip", so a short board is obvious rather than silent.
+                if str(name).strip().upper() == SKIP_SENTINEL:
+                    starters.pop(team, None)
+                    summary_rows.append({
+                        "team": team,
+                        "qb_id": None,
+                        "qb_name": None,
+                        "source": "skip",
+                        "as_of": f"{season} wk{week}",
+                        "window_starts": "skip",
+                    })
+                    continue
+
                 matches = qbs[qbs["display_name"] == name]
 
                 if matches.empty:
@@ -138,13 +211,31 @@ def resolve_starters(season, week):
                         f"— candidates:\n{candidates.to_string(index=False)}"
                     )
 
-                starters[team] = gsis_ids[0]
+                gsis_id = gsis_ids[0]
+
+                # No-history guard (step 69B), mirroring _apply_roster_override:
+                # a QB with no prior qb_matrix rows would produce all-NaN rolling
+                # features and be dropped silently in preprocessing. Raise instead.
+                if history[history["qb_id"] == gsis_id].empty:
+                    info = matches.iloc[0]
+                    raise ValueError(
+                        f"starters_override.csv: '{name}' ({team}) has NO qb_matrix history "
+                        f"before {season} wk{week}, so every rolling feature would be NaN and "
+                        f"he cannot be predicted. "
+                        f"(rookie_season={info['rookie_season']}, last_season={info['last_season']}, "
+                        f"latest_team={info['latest_team']}.) "
+                        f"If this really is the starter and he has no NFL history, use "
+                        f"player_name={SKIP_SENTINEL} to drop {team} from the board instead."
+                    )
+
+                starters[team] = gsis_id
                 summary_rows.append({
                     "team": team,
-                    "qb_id": gsis_ids[0],
+                    "qb_id": gsis_id,
                     "qb_name": name,
                     "source": "override",
                     "as_of": f"{season} wk{week}",
+                    "window_starts": "override",
                 })
 
     summary = pd.DataFrame(summary_rows)
@@ -225,7 +316,15 @@ def run_week(season, week, lines=None, force=False, line_overrides=None, label=N
     print("Starter resolution:")
     print(starter_summary.to_string(index=False))
 
-    features = build_prediction_features(season, week, starters=starters, line_overrides=line_overrides)
+    # SKIPped teams are read off the summary (source == "skip") rather than from a
+    # third return value, so resolve_starters' 2-tuple contract is unchanged for
+    # existing callers. They must be passed explicitly: omitting a team from
+    # `starters` alone is NOT enough to keep it off the board (step 70).
+    skip_teams = starter_summary.loc[starter_summary["source"] == "skip", "team"].tolist()
+
+    features = build_prediction_features(
+        season, week, starters=starters, line_overrides=line_overrides, skip_teams=skip_teams
+    )
     features = preprocess_qb_matrix(features)
 
     raw_pred = final_pipeline.predict(features[FEATURE_COLS])

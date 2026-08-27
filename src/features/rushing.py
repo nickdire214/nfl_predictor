@@ -24,6 +24,7 @@ from src.features.receiving import (
     ROSTER_WINDOW_GAMES,
     SNAP_LABEL_SYNONYMS,
     _apply_latest_team,
+    _apply_roster_override,
     _audit_snap_position_labels,
     _build_crosswalk,
     _build_window_roster,
@@ -268,6 +269,10 @@ def build_rushing_prediction_features(
         apply_latest_team = _latest_team_is_authoritative(players, season)
     if apply_latest_team:
         roster_df = _apply_latest_team(roster_df, players, target_teams, verbose=verbose)
+
+    roster_df = _apply_roster_override(
+        roster_df, historical, players, season, week, "rushing", verbose=verbose
+    )
 
     target_rows = roster_df.merge(target_games, on="team", how="left")
 

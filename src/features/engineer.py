@@ -215,7 +215,8 @@ def add_rolling_features(df):
     return _compute_rolling_features(df)
 
 
-def build_prediction_features(season, week, starters=None, line_overrides=None):
+def build_prediction_features(season, week, starters=None, line_overrides=None,
+                              skip_teams=None):
     """Build feature rows for an upcoming week's games.
 
     Uses the same base-table and rolling-feature machinery as the
@@ -228,6 +229,12 @@ def build_prediction_features(season, week, starters=None, line_overrides=None):
     starters: optional dict {team: gsis_id} overriding the QB for that
     team. Teams not in starters fall back to schedules' home_qb_id /
     away_qb_id columns.
+
+    skip_teams: optional iterable of teams to EXCLUDE from the frame
+    entirely (the SKIP sentinel in starters_override.csv). These are
+    dropped before the schedule fallback above, so a skipped team cannot
+    be silently resurrected from schedules' own qb_id — which is exactly
+    what happened on completed weeks before step 70.
 
     line_overrides: optional dict {team: (spread_line, total_line)} for
     when schedules hasn't populated lines for future games yet. Live use
@@ -249,6 +256,15 @@ def build_prediction_features(season, week, starters=None, line_overrides=None):
 
     target_sched = schedules[(schedules["season"] == season) & (schedules["week"] == week)]
     target_games = _build_team_game_view(target_sched)
+
+    # Drop SKIPped teams BEFORE the schedule fallback (step 70). _build_team_game_view
+    # seeds qb_id from schedules' home_qb_id/away_qb_id, which is populated for any
+    # completed week -- so without this a SKIPped team would silently fall back to the
+    # schedule's QB and be predicted anyway. It only looked correct on future weeks,
+    # where those columns are null and the row happened to die in preprocessing.
+    skip_teams = set(skip_teams or ())
+    if skip_teams:
+        target_games = target_games[~target_games["team"].isin(skip_teams)].copy()
 
     for team, qb_id in starters.items():
         target_games.loc[target_games["team"] == team, "qb_id"] = qb_id

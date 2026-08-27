@@ -207,6 +207,112 @@ def _apply_latest_team(roster_df, players, valid_teams, verbose=False):
     return out.drop(columns=["_status", "_latest_team"]).reset_index(drop=True)
 
 
+ROSTER_OVERRIDE_PATH = PROJECT_ROOT / "data" / "predictions" / "roster_override.csv"
+ROSTER_OVERRIDE_MARKETS = {"receiving", "rushing"}
+
+
+def _apply_roster_override(roster_df, historical, players, season, week, market, verbose=False):
+    """Manually add players to a prediction board (step 67B).
+
+    Reads data/predictions/roster_override.csv (columns: season, week, market,
+    team, player_name; market in {receiving, rushing}) and injects the matching
+    rows into the target-week roster. This is the mechanism RUNBOOK §5.2b
+    assumed but did not have: a player whose last appearance falls outside
+    ROSTER_WINDOW_GAMES is invisible to the board, and a posted book line is the
+    signal that he is back.
+
+    Name resolution mirrors starters_override.csv -- exact `display_name` match
+    against players.parquet, with unknown and ambiguous names raising a
+    ValueError that lists candidates. It deliberately does NOT filter by
+    position first (starters_override filters to QB): a canonically-CB two-way
+    player like Travis Hunter must remain addressable, and the history guard
+    below is a stricter check than a position filter would be.
+
+    Extra guard: the resolved player must have rows in the historical spine
+    strictly before (season, week). Without them every rolling feature would be
+    NaN and preprocess_* would silently drop him, so this raises instead.
+
+    The override wins on team assignment: if the player is already on the board
+    (on some other team), his existing row is replaced.
+    """
+    if not ROSTER_OVERRIDE_PATH.exists():
+        return roster_df
+
+    ov = pd.read_csv(ROSTER_OVERRIDE_PATH)
+    missing_cols = {"season", "week", "market", "team", "player_name"} - set(ov.columns)
+    if missing_cols:
+        raise ValueError(
+            f"roster_override.csv: missing required column(s) {sorted(missing_cols)}; "
+            f"expected season, week, market, team, player_name"
+        )
+
+    bad_market = set(ov["market"].unique()) - ROSTER_OVERRIDE_MARKETS
+    if bad_market:
+        raise ValueError(
+            f"roster_override.csv: unknown market value(s) {sorted(bad_market)}; "
+            f"expected one of {sorted(ROSTER_OVERRIDE_MARKETS)}"
+        )
+
+    ov = ov[(ov["season"] == season) & (ov["week"] == week) & (ov["market"] == market)]
+    if ov.empty:
+        return roster_df
+
+    added = []
+    for _, row in ov.iterrows():
+        team, name = row["team"], row["player_name"]
+        matches = players[players["display_name"] == name]
+
+        if matches.empty:
+            raise ValueError(
+                f"roster_override.csv: unknown player_name '{name}' for team {team} "
+                f"({market}) — no player in players.parquet matches this display_name"
+            )
+
+        gsis_ids = matches["gsis_id"].dropna().unique()
+        if len(gsis_ids) > 1:
+            cands = matches[["gsis_id", "display_name", "position", "rookie_season", "last_season"]]
+            raise ValueError(
+                f"roster_override.csv: ambiguous player_name '{name}' for team {team} "
+                f"({market}) — candidates:\n{cands.to_string(index=False)}"
+            )
+
+        gsis_id = gsis_ids[0]
+        hist = historical[historical["gsis_id"] == gsis_id]
+        if hist.empty:
+            info = matches.iloc[0]
+            raise ValueError(
+                f"roster_override.csv: '{name}' ({team}, {market}) has NO history in the "
+                f"{market} spine before {season} wk{week}, so every rolling feature would "
+                f"be NaN and he cannot be predicted. "
+                f"(position={info['position']}, rookie_season={info['rookie_season']}, "
+                f"last_season={info['last_season']}.) Remove the row, or wait until he has "
+                f"played a game."
+            )
+
+        last = hist.sort_values(["season", "week"]).iloc[-1]
+        added.append({
+            "gsis_id": gsis_id,
+            "player": last["player"],
+            "position": last["position"],
+            "team": team,
+            "as_of": f"{int(last['season'])} wk{int(last['week']):02d}",
+        })
+
+    add_df = pd.DataFrame(added)
+    # override wins on team assignment: drop any existing row for these players
+    kept = roster_df[~roster_df["gsis_id"].isin(add_df["gsis_id"])]
+    replaced = len(roster_df) - len(kept)
+    out = pd.concat([kept, add_df], ignore_index=True)
+
+    if verbose:
+        print(f"  roster_override ({market}): +{len(add_df)} rows "
+              f"({replaced} existing row(s) replaced)")
+        for r in added:
+            print(f"    {r['player']} -> {r['team']} ({r['position']}, as_of {r['as_of']})")
+
+    return out
+
+
 def _canonical_position_map(players):
     """gsis_id -> canonical position from players.parquet.
 
@@ -514,6 +620,10 @@ def build_receiving_prediction_features(
         apply_latest_team = _latest_team_is_authoritative(players, season)
     if apply_latest_team:
         roster_df = _apply_latest_team(roster_df, players, target_teams, verbose=verbose)
+
+    roster_df = _apply_roster_override(
+        roster_df, historical, players, season, week, "receiving", verbose=verbose
+    )
 
     target_rows = roster_df.merge(target_games, on="team", how="left")
 
