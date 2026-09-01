@@ -383,20 +383,85 @@ def consensus_game_lines(lines_df):
     )
 
 
-def lines_to_overrides(consensus_df, matched_events):
-    """Convert consensus game lines to the line_overrides dict.
+def lines_to_overrides(consensus_df, matched_events, season, week):
+    """Convert consensus game lines to the line_overrides dict for ONE week.
 
     Returns {team: (spread_line, total_line)} for both teams of each
     matched game, in nflverse's spread_line convention (positive =
     home favored). The Odds API's spread_home is the home team's
     handicap (home favorite = negative), so spread_line = -spread_home.
 
+    `season` and `week` are REQUIRED and the frame is filtered to them here.
+
+    Why the function filters rather than trusting a pre-filtered frame: the
+    returned dict is keyed by TEAM, so a frame spanning several weeks does not
+    error and does not produce NaN -- each team simply ends up with whichever of
+    its games iterated last, silently giving every row of the prediction a wrong
+    team_implied_total. A saved game-lines snapshot spans the whole season (272
+    events), so the unfiltered frame is the natural thing to pass and the
+    corruption is invisible. Requiring `season`/`week` -- and requiring the
+    columns needed to honour them -- makes the mistake impossible to make
+    quietly.
+
+    Raises ValueError if:
+      - `matched_events` lacks `season`/`week` columns (week identity cannot be
+        verified, so filtering cannot be honoured -- refuse rather than guess);
+      - no rows survive the (season, week) filter;
+      - a team appears in more than one surviving game (the corruption symptom).
+
+    Events that matched no schedule row (NaN season/week, from
+    match_events_to_schedule) carry no week identity and are dropped, with a
+    count printed.
+
     Prints a 3-game sanity check after conversion: for each game, shows
     the converted spread_line and both teams' implied totals, and
     confirms the favorite (per the original spread_home) has the larger
     implied total.
     """
-    merged = matched_events.merge(consensus_df, on="event_id", how="inner")
+    missing_cols = {"season", "week"} - set(matched_events.columns)
+    if missing_cols:
+        raise ValueError(
+            f"lines_to_overrides requires season/week columns on matched_events to "
+            f"filter to a single week; missing {sorted(missing_cols)}. Pass the output "
+            f"of match_events_to_schedule(), or join the snapshot's events to "
+            f"schedules.parquet first. Columns present: {sorted(matched_events.columns)}"
+        )
+
+    scoped = matched_events.copy()
+    n_all = len(scoped)
+    unidentified = scoped["season"].isna() | scoped["week"].isna()
+    if unidentified.any():
+        print(f"\nlines_to_overrides: dropping {int(unidentified.sum())} event(s) with no "
+              f"schedule match (NaN season/week) — no week identity to filter on.")
+        scoped = scoped[~unidentified]
+
+    scoped = scoped[(scoped["season"] == season) & (scoped["week"] == week)]
+    if scoped.empty:
+        raise ValueError(
+            f"lines_to_overrides: no events for {season} week {week} in matched_events "
+            f"({n_all} rows in, spanning "
+            f"{sorted(matched_events.dropna(subset=['season', 'week'])[['season', 'week']].drop_duplicates().itertuples(index=False, name=None))})."
+        )
+    if len(scoped) < n_all:
+        print(f"lines_to_overrides: filtered {n_all} -> {len(scoped)} events for "
+              f"{season} week {week}.")
+
+    merged = scoped.merge(consensus_df, on="event_id", how="inner")
+    if merged.empty:
+        raise ValueError(
+            f"lines_to_overrides: {len(scoped)} events for {season} week {week} but none "
+            f"have consensus lines (event_id join was empty)."
+        )
+
+    teams = pd.concat([merged["home_team"], merged["away_team"]])
+    dupes = sorted(teams[teams.duplicated()].unique())
+    if dupes:
+        raise ValueError(
+            f"lines_to_overrides: team(s) {dupes} appear in more than one game for "
+            f"{season} week {week}. The override dict is keyed by team, so one of the "
+            f"games would silently win. Deduplicate the events before calling."
+        )
+
     merged["spread_line"] = -merged["spread_home"]
     merged["total_line"] = merged["total"]
 

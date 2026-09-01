@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review queue — {{ season }} wk{{ week }}</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb;
+    --panel: #f9fafb; --blocking: #b91c1c; --check: #b45309; --discount: #6b7280;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --fg:#e6e6e6; --muted:#9aa1ab; --line:#272b33;
+            --panel:#161920; --blocking:#f87171; --check:#fbbf24; --discount:#9aa1ab; }
+  }
+  body { background: var(--bg); color: var(--fg); margin: 0;
+         font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 20px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 32px 0 8px; padding-bottom: 6px;
+       border-bottom: 1px solid var(--line); }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .banner { background: var(--panel); border: 1px solid var(--line);
+            border-radius: 6px; padding: 10px 12px; margin: 12px 0 4px; font-size: 13px; }
+  .banner code { font-size: 12px; }
+  .kind-canonical { color: #15803d; font-weight: 600; }
+  .kind-labeled { color: var(--check); font-weight: 600; }
+  .kind-missing { color: var(--blocking); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .03em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  .sev { font-size: 11px; font-weight: 700; text-transform: uppercase;
+         letter-spacing: .04em; }
+  .sev-blocking { color: var(--blocking); }
+  .sev-check { color: var(--check); }
+  .sev-discount { color: var(--discount); }
+  tr.skip td { color: var(--blocking); font-style: italic; }
+  tr.mismatch td { color: var(--check); }
+  .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  form { margin: 12px 0 0; font-size: 13px; }
+  input { width: 70px; padding: 3px 6px; background: var(--bg);
+          color: var(--fg); border: 1px solid var(--line); border-radius: 4px; }
+  button { padding: 4px 12px; border: 1px solid var(--line); border-radius: 4px;
+           background: var(--panel); color: var(--fg); cursor: pointer; }
+  th.sortable { cursor: pointer; }
+  th.sortable:hover { color: var(--fg); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Review queue — {{ season }} week {{ week }}</h1>
+  <p class="sub">Read-only viewer. This page never writes, never runs a model, never edits an override.</p>
+
+  <form method="get">
+    season <input type="number" name="season" value="{{ season }}">
+    week <input type="number" name="week" value="{{ week }}">
+    label <input type="text" name="label" value="{{ label or '' }}" placeholder="(auto)" style="width:130px">
+    <button type="submit">Load</button>
+  </form>
+
+  <div class="banner">
+    <strong>Showing:</strong>
+    {% for s in sources %}
+      <div>
+        {{ s.market }} —
+        <span class="kind-{{ s.kind }}">{{ s.kind }}</span>
+        <code>{{ s.filename }}</code>
+        ({{ s.rows }} rows, generated {{ s.generated }}) <span class="note">{{ s.note }}</span>
+        {% if s.error %}<span class="kind-missing">{{ s.error }}</span>{% endif %}
+      </div>
+    {% endfor %}
+  </div>
+
+  {% if not any_log %}
+    <p class="empty">No prediction log found for {{ season }} week {{ week }}. Nothing to display.</p>
+  {% endif %}
+
+  <h2>1 · Needs attention <span class="note">({{ attention|length }})</span></h2>
+  {% if attention %}
+  <div class="scroll"><table>
+    <tr><th>Severity</th><th>Category</th><th>Subject</th><th>Why</th></tr>
+    {% for a in attention %}
+      <tr>
+        <td class="sev sev-{{ a.severity }}">{{ a.severity }}</td>
+        <td>{{ a.category }}</td>
+        <td>{{ a.subject }}</td>
+        <td>{{ a.why }}</td>
+      </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+    <p class="empty">Nothing flagged.</p>
+  {% endif %}
+
+  <h2>2 · Prop board <span class="note">({{ board|length }} priced rows)</span></h2>
+  <p class="note">Display only — pure-logging mode (RUNBOOK §4). No edge flagging, no bet recommendations.</p>
+  {% if board %}
+  <div class="scroll"><table id="board">
+    <tr>
+      <th class="sortable" onclick="sortBoard(0,false)">Player</th>
+      <th>Team</th><th>Market</th>
+      <th class="num sortable" onclick="sortBoard(3,true)">Pred</th>
+      <th class="num sortable" onclick="sortBoard(4,true)">Line</th>
+      <th class="num sortable" onclick="sortBoard(5,true)">Ours</th>
+      <th class="num">Mkt</th>
+      <th class="num sortable" onclick="sortBoard(7,true)">Diff &#8645;</th>
+      <th class="num">Books</th>
+    </tr>
+    {% for r in board %}
+      <tr>
+        <td>{{ r.player }}</td><td>{{ r.team }}</td><td>{{ r.market }}</td>
+        <td class="num">{{ '%.1f'|format(r.prediction) }}</td>
+        <td class="num">{{ '%.1f'|format(r.line) }}</td>
+        <td class="num">{{ '%.3f'|format(r.prob_over) }}</td>
+        <td class="num">{{ '%.3f'|format(r.mkt_prob) if r.mkt_prob is not none else '—' }}</td>
+        <td class="num">{{ '%+.3f'|format(r.diff) if r.diff is not none else '—' }}</td>
+        <td class="num">{{ r.n_books if r.n_books is not none else '—' }}</td>
+      </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+    <p class="empty">No priced rows — no prop lines are attached to this week's logs.</p>
+  {% endif %}
+
+  <h2>3 · QB starters <span class="note">({{ starters|length }})</span></h2>
+  {% if starters_error %}
+    <p class="empty">Could not resolve starters: {{ starters_error }}</p>
+  {% elif starters %}
+  <div class="scroll"><table>
+    <tr><th>Team</th><th>QB</th><th>Source</th><th>as_of</th>
+        <th>window_starts</th><th>latest_team</th><th>Status</th></tr>
+    {% for r in starters %}
+      <tr class="{{ 'skip' if r.source == 'skip' else ('mismatch' if r.team_mismatch else '') }}">
+        <td>{{ r.team }}</td>
+        <td>{{ r.qb_name or '— no starter —' }}</td>
+        <td>{{ r.source }}</td>
+        <td>{{ r.as_of }}</td>
+        <td>{{ r.window_starts }}</td>
+        <td>{{ r.latest_team or '—' }}</td>
+        <td>{{ r.status or '—' }}</td>
+      </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+    <p class="empty">No starter table available.</p>
+  {% endif %}
+
+  <h2>4 · Roster staleness <span class="note">({{ stale|length }} rows, oldest first)</span></h2>
+  {% if stale %}
+  <div class="scroll"><table>
+    <tr><th>as_of</th><th class="num">Games back</th><th>Player</th><th>Team</th>
+        <th>Market</th><th class="num">Pred</th><th>Slice basis</th></tr>
+    {% for r in stale %}
+      <tr>
+        <td>{{ r.as_of }}</td>
+        <td class="num">{{ r.games_back if r.games_back is not none else '?' }}</td>
+        <td>{{ r.player }}</td><td>{{ r.team }}</td><td>{{ r.market }}</td>
+        <td class="num">{{ '%.1f'|format(r.prediction) }}</td>
+        <td class="note">{{ r.slice_basis }}</td>
+      </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
+    <p class="empty">No rows carry an as_of value for this week.</p>
+  {% endif %}
+
+</div>
+
+<script>
+function sortBoard(col, numeric) {
+  var t = document.getElementById('board');
+  if (!t) return;
+  var rows = Array.prototype.slice.call(t.rows, 1);
+  var asc = t.getAttribute('data-col') !== String(col) || t.getAttribute('data-asc') !== '1';
+  rows.sort(function (a, b) {
+    var x = a.cells[col].innerText.trim(), y = b.cells[col].innerText.trim();
+    if (numeric) {
+      var nx = parseFloat(x.replace('+', '')), ny = parseFloat(y.replace('+', ''));
+      if (isNaN(nx)) nx = -Infinity;
+      if (isNaN(ny)) ny = -Infinity;
+      return asc ? nx - ny : ny - nx;
+    }
+    return asc ? x.localeCompare(y) : y.localeCompare(x);
+  });
+  rows.forEach(function (r) { t.tBodies[0].appendChild(r); });
+  t.setAttribute('data-col', col);
+  t.setAttribute('data-asc', asc ? '1' : '0');
+}
+</script>
+</body>
+</html>

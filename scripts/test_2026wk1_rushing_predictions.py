@@ -47,8 +47,9 @@ consensus_df = consensus_game_lines(lines_df)
 print(f"\nConsensus lines: {len(consensus_df)} games")
 print(consensus_df.to_string(index=False))
 
-week1_matched = matched[(matched["season"] == 2026) & (matched["week"] == 1)]
-overrides = lines_to_overrides(consensus_df, week1_matched)
+# lines_to_overrides now owns the week filter (step 75) — pass the full matched
+# frame and the target week; it raises rather than silently spanning weeks.
+overrides = lines_to_overrides(consensus_df, matched, 2026, 1)
 
 # force=True: this is an idempotent rehearsal on a labeled (non-canonical) log.
 result = run_week_rushing(2026, 1, line_overrides=overrides, label="aug_test", force=True)

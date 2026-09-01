@@ -157,6 +157,10 @@ def run_week_receiving(season, week, line_overrides=None, lines=None, label=None
 
     `label`: optional string; if set the filename gains a `_{label}` suffix,
     for non-canonical/test runs that mustn't collide with real weekly logs.
+
+    The saved log carries `targets_l8` alongside `team_implied_total` and
+    `as_of` so the prop slice (targets_l8 >= 3) is selectable directly from the
+    log without rejoining the matrix — mirroring `carries_l8` in the rushing log.
     """
     artifacts = load_artifacts()
 
@@ -210,9 +214,15 @@ def run_week_receiving(season, week, line_overrides=None, lines=None, label=None
         for p, pos in zip(calibrated_pred, positions)
     ])
 
+    # targets_l8 is carried into the log as the prop-slice selector (the prop
+    # population is targets_l8 >= 3, per evaluate_receiving.PROP_MIN_TARGETS_L8), mirroring
+    # carries_l8 in the rushing log (step 53). It is already a model FEATURE_COL;
+    # surfacing it here is log metadata only -- no model change -- and it lets a
+    # live log be filtered to the priced population without rejoining the
+    # receiving matrix.
     result = features[[
         "season", "week", "team", "opponent", "gsis_id", "player", "position",
-        "team_implied_total", "as_of",
+        "team_implied_total", "as_of", "targets_l8",
     ]].reset_index(drop=True).copy()
     result["pred_receiving_yards"] = calibrated_pred
     for i, level in enumerate(QUANTILE_LEVELS):
