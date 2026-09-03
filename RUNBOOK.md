@@ -561,22 +561,28 @@ probability layers.
 Zero fuzzy matches and zero `ambiguous_both_teams` in either run — every
 resolution was an exact normalized match.
 
-**QB starters for 2026 wk1 are resolved.** `starters_override.csv` holds 6 named
-overrides and 2 SKIPs → **30-team board, zero `latest_team` mismatches** (was 3
+**QB starters for 2026 wk1 are resolved.** `starters_override.csv` holds 7 named
+overrides and 1 SKIP → **31-team board, zero `latest_team` mismatches** (was 3
 before the overrides, plus 5 right-team/wrong-QB cases).
 
-| Team | Starter | Source |
-| --- | --- | --- |
-| DEN | Bo Nix | override |
-| IND | Daniel Jones | override |
-| KC | Patrick Mahomes | override |
-| MIA | Malik Willis | override |
-| NYJ | Geno Smith | override |
-| WAS | Jayden Daniels | override |
-| ATL | — | **SKIP** |
-| LV | — | **SKIP** |
+| Team | Starter | Source | Resolved |
+| --- | --- | --- | --- |
+| DEN | Bo Nix | override | 2026-08-27 |
+| IND | Daniel Jones | override | 2026-08-27 |
+| KC | Patrick Mahomes | override | 2026-08-27 |
+| LV | Kirk Cousins | override | **2026-09-02** (was SKIP) |
+| MIA | Malik Willis | override | 2026-08-27 |
+| NYJ | Geno Smith | override | 2026-08-27 |
+| WAS | Jayden Daniels | override | 2026-08-27 |
+| ATL | — | **SKIP** | still undecided |
 
 The other 24 teams resolve from the default rule (most recent 2025 start).
+
+LV was SKIP from 2026-08-27 until the job was settled on **2026-09-02**. Cousins
+clears the no-history guard (64 `qb_matrix` rows, most recent 2025 wk18) and his
+`latest_team` is already LV, so no mismatch fires. His rolling form is carried
+from his ATL games — correctly so: historical rows are never rewritten to a
+player's current team (step 61), only the prediction-time team assignment moves.
 
 **SKIP sentinel and no-history guard both enforced.** Step 70 made SKIP explicit
 (`build_prediction_features(..., skip_teams=...)`) rather than incidental — it

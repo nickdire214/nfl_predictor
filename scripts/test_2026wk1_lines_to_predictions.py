@@ -41,7 +41,9 @@ print(consensus_df.to_string(index=False))
 # frame and the target week; it raises rather than silently spanning weeks.
 overrides = lines_to_overrides(consensus_df, matched, 2026, 1)
 
-result = run_week(2026, 1, line_overrides=overrides, label="june_test")
+# force=True: this is an idempotent rehearsal on a labeled (non-canonical) log,
+# matching the receiving and rushing sibling scripts.
+result = run_week(2026, 1, line_overrides=overrides, label="june_test", force=True)
 
 print("\nPredictions:")
 print(result.to_string(index=False))
