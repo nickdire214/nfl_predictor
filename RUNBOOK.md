@@ -46,9 +46,11 @@ venv\Scripts\python.exe -m src.models.evaluate           --season YYYY --week N
 venv\Scripts\python.exe -m src.models.evaluate_receiving --season YYYY --week N
 venv\Scripts\python.exe -m src.models.evaluate_rushing   --season YYYY --week N
 
-REM 2. SNAPSHOT the current matrices BEFORE re-ingesting (see note below)
-mkdir data\_feature_backups\YYYY-MM-DD
-copy data\features\*.parquet data\_feature_backups\YYYY-MM-DD\
+REM 2. SNAPSHOT features AND raw BEFORE re-ingesting (see note below)
+mkdir data\_feature_backups\YYYY-MM-DD\features
+mkdir data\_feature_backups\YYYY-MM-DD\raw
+copy data\features\*.parquet data\_feature_backups\YYYY-MM-DD\features\
+copy data\raw\*.parquet      data\_feature_backups\YYYY-MM-DD\raw\
 
 REM 3. Refresh raw data
 venv\Scripts\python.exe -m src.ingestion.stats
@@ -76,6 +78,33 @@ Proven in the 2026-08-27 dry run: the snapshot diff caught receiving 30,574 →
 30,575 (one added row, Jacoby Jones WAS 2025 wk11, from a refreshed crosswalk),
 confirmed purely additive with 0 rows lost and QB/rushing unchanged — in seconds,
 and with certainty rather than inference.
+
+**Why `data/raw/` is snapshotted too (added 2026-09-07).** The original step 2
+copied only `data/features/`, on the assumption that the matrices are where
+change shows up. On 2026-09-07 that assumption failed in the other direction:
+all three matrices came back **byte-identical** — 0 rows added, 0 removed, 0
+changed values — while `players.parquet` was the file that had actually moved,
+and it drove **87 players off the receiving and rushing boards** as camp cuts
+flipped their `status` out of `{ACT, PUP}` (receiving 412 → 350, rushing
+111 → 92; DEV 65, RES 10, RSR 10, EXE 1, including Josh Jacobs GB and Isiah
+Pacheco DET). Because `/data/` is gitignored and the ingestion had already
+overwritten it, there was no pre-ingestion `players.parquet` to diff — the 87
+drops had to be reconstructed *indirectly* from the before/after board outputs.
+That works, but it is inference rather than a diff, and it only worked because
+labeled board logs from the prior run happened to still be on disk. The matrices
+are the thing that changes rarely; the raw layer is the thing that changes
+weekly, and it is what roster resolution actually reads.
+
+Snapshots go in `features/` and `raw/` subfolders of the dated directory so a
+diff script knows which side of the pipeline it is looking at.
+
+**Size cost, so the habit does not get quietly abandoned.** `data/raw/` is
+roughly 8 MB and `data/features/` roughly 6 MB, so a dated snapshot of both runs
+about **14 MB**. At one per week that is **~250 MB across a season** — cheap
+against a single un-diagnosable drift, but large enough to notice if it is never
+pruned. **Old snapshots can be deleted once that week's diff has been read** —
+the value is entirely in the comparison, not in the archive. Keep at least the
+last two (§2 rule above).
 
 **Watch the spine builders' output during step 3** — see §6 (label audit).
 
@@ -561,8 +590,8 @@ probability layers.
 Zero fuzzy matches and zero `ambiguous_both_teams` in either run — every
 resolution was an exact normalized match.
 
-**QB starters for 2026 wk1 are resolved.** `starters_override.csv` holds 7 named
-overrides and 1 SKIP → **31-team board, zero `latest_team` mismatches** (was 3
+**QB starters for 2026 wk1 are resolved.** `starters_override.csv` holds 8 named
+overrides and **zero SKIPs** → **full 32-team board, zero `latest_team` mismatches** (was 3
 before the overrides, plus 5 right-team/wrong-QB cases).
 
 | Team | Starter | Source | Resolved |
@@ -574,13 +603,14 @@ before the overrides, plus 5 right-team/wrong-QB cases).
 | MIA | Malik Willis | override | 2026-08-27 |
 | NYJ | Geno Smith | override | 2026-08-27 |
 | WAS | Jayden Daniels | override | 2026-08-27 |
-| ATL | — | **SKIP** | still undecided |
+| ATL | Tua Tagovailoa | override | **2026-09-07** (was SKIP) |
 
 The other 24 teams resolve from the default rule (most recent 2025 start).
 
-LV was SKIP from 2026-08-27 until the job was settled on **2026-09-02**. Cousins
-clears the no-history guard (64 `qb_matrix` rows, most recent 2025 wk18) and his
-`latest_team` is already LV, so no mismatch fires. His rolling form is carried
+LV was SKIP from 2026-08-27 to **2026-09-02**; ATL from 2026-08-27 to
+**2026-09-07**. Both clear the no-history guard (Cousins 64 `qb_matrix` rows,
+latest 2025 wk18; Tua 67 rows, latest 2025 wk15) and both have a matching
+`latest_team`, so no mismatch fires. His rolling form is carried
 from his ATL games — correctly so: historical rows are never rewritten to a
 player's current team (step 61), only the prediction-time team assignment moves.
 
