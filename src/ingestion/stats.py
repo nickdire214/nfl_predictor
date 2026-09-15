@@ -8,10 +8,18 @@ to pandas conversion.
 
 import nflreadpy as nfl
 
-from src.ingestion._common import RAW_DATA_DIR, save_parquet
+from src.ingestion._common import RAW_DATA_DIR, current_season, save_parquet
 
-SEASONS = list(range(2021, 2026))
-SCHEDULE_SEASONS = list(range(2021, 2027))
+# Upper bound derived from the date, not hardcoded (step 87): a literal end year
+# is a bug with a one-year fuse, and it fired -- 2026 was silently missing from
+# player_stats and snap_counts on the first live grading run. Schedules run one
+# season past the stats because the upcoming slate is published before it is played.
+# Requesting a season nflverse has not published yet (SCHEDULE_SEASONS always
+# asks for one) returns EMPTY SILENTLY -- no error, no warning, and the saved
+# file simply lacks that season. Never read a successful run as proof that a
+# season arrived; check `seasons present` in the printed output.
+SEASONS = list(range(2021, current_season() + 1))
+SCHEDULE_SEASONS = list(range(2021, current_season() + 2))
 
 
 def ingest_player_stats(seasons):

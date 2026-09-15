@@ -7,9 +7,10 @@ beyond Polars to pandas conversion.
 
 import nflreadpy as nfl
 
-from src.ingestion._common import RAW_DATA_DIR, save_parquet
+from src.ingestion._common import RAW_DATA_DIR, current_season, save_parquet
 
-SEASONS = list(range(2021, 2026))
+# Date-derived, not hardcoded -- see the note in stats.py (step 87).
+SEASONS = list(range(2021, current_season() + 1))
 
 
 def ingest_injuries(seasons):

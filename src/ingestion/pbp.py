@@ -43,12 +43,16 @@ import pandas as pd
 
 import nflreadpy as nfl
 
-from src.ingestion._common import PROJECT_ROOT
+from src.ingestion._common import PROJECT_ROOT, current_season
 
 FEATURES_DIR = PROJECT_ROOT / "data" / "features"
 
-SEASONS = list(range(2021, 2026))
-FTN_SEASONS = list(range(2022, 2026))          # FTN charting starts in 2022
+# Date-derived upper bound, not a literal (step 88). These carried the same
+# `range(2021, 2026)` that silently excluded 2026 from player_stats on the
+# first live grading run -- see the note in stats.py. Nothing consumes these
+# aggregates yet, so the fuse here was long, but it was the same fuse.
+SEASONS = list(range(2021, current_season() + 1))
+FTN_SEASONS = list(range(2022, current_season() + 1))   # FTN charting starts in 2022
 
 PFR_COUNT_COLS = ["times_pressured", "times_blitzed", "times_hurried",
                   "times_sacked", "times_hit"]

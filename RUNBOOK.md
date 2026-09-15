@@ -34,35 +34,67 @@ two distinct estimators, deliberately both surfaced and named by source. See §5
 
 ## 2. Weekly cadence
 
-### Tuesday — grade last week, then rebuild features
+### Tuesday — rebuild features, then grade last week
 
-Grade first (graders read the canonical prediction logs, which the rebuild does
-not touch), then refresh the raw layer and rebuild the matrices.
+Snapshot, refresh, rebuild, diff, **then** grade. Grading is LAST. Read the
+note below before changing that order.
 
 ```
-REM 1. Grade the completed week (all three markets)
-REM     PRE-SEASON: skip — there is nothing to grade before week 1 is played.
-venv\Scripts\python.exe -m src.models.evaluate           --season YYYY --week N
-venv\Scripts\python.exe -m src.models.evaluate_receiving --season YYYY --week N
-venv\Scripts\python.exe -m src.models.evaluate_rushing   --season YYYY --week N
-
-REM 2. SNAPSHOT features AND raw BEFORE re-ingesting (see note below)
+REM 1. SNAPSHOT features AND raw BEFORE re-ingesting (see note below)
 mkdir data\_feature_backups\YYYY-MM-DD\features
 mkdir data\_feature_backups\YYYY-MM-DD\raw
 copy data\features\*.parquet data\_feature_backups\YYYY-MM-DD\features\
 copy data\raw\*.parquet      data\_feature_backups\YYYY-MM-DD\raw\
 
-REM 3. Refresh raw data
+REM 2. Refresh raw data
 venv\Scripts\python.exe -m src.ingestion.stats
 venv\Scripts\python.exe -m src.ingestion.injuries
 
-REM 4. Rebuild feature matrices
+REM 3. Rebuild feature matrices
 venv\Scripts\python.exe -m src.features.engineer
 venv\Scripts\python.exe -m src.features.receiving
 venv\Scripts\python.exe -m src.features.rushing
+
+REM 4. Diff against the snapshot — confirm the refresh was purely additive
+venv\Scripts\python.exe scripts\diff_snapshot.py --date YYYY-MM-DD
+
+REM 5. Grade the completed week (all three markets) — LAST, see note below
+REM     PRE-SEASON: skip — there is nothing to grade before week 1 is played.
+venv\Scripts\python.exe -m src.models.evaluate           --season YYYY --week N
+venv\Scripts\python.exe -m src.models.evaluate_receiving --season YYYY --week N
+venv\Scripts\python.exe -m src.models.evaluate_rushing   --season YYYY --week N
 ```
 
-**Why the snapshot (step 2) is not optional.** An nflverse refresh can silently
+**Why grading is LAST, and must not be moved back to first (corrected
+2026-09-15, step 88).** This section previously ordered grading *first*, on the
+reasoning that "graders read the canonical prediction logs, which the rebuild
+does not touch". That statement is true, and it is not the point. What the
+graders also read is the **actuals** — and the actuals for the week just played
+arrive in step 2, the ingestion. Run in the old order, grading week N executes
+against a raw layer whose most recent week is N-1: there is nothing to join to,
+and **every row comes back ungraded**.
+
+The prediction logs being untouched by the rebuild means the two halves of the
+cadence are safely independent, which is why grading can sit anywhere *after*
+ingestion. It does not mean grading can precede the arrival of the data it
+grades. The original note reasoned about the wrong input.
+
+This survived undetected until the first live grading run (2026 wk1, step 87)
+because every prior grading run was a **replay of a completed season**, where
+the actuals were already on disk before the module was ever invoked. A replay
+cannot detect an ordering bug of this kind; only a live week can. If you are
+tempted to "correct" grading back to the top of the list, check whether the week
+you want to grade is present in `data/raw/player_stats.parquet` first — that,
+not the integrity of the prediction logs, is the binding constraint.
+
+**Step 4 is not optional either.** The diff is what converts "the refresh
+probably just appended this week" into a checked fact. `scripts/diff_snapshot.py`
+compares by natural key rather than row count (a count cannot tell 10 added from
+15 added and 5 dropped), reports which season/week the added rows belong to, and
+checks every shared row for value drift. Read its VERDICT block before doing
+anything downstream.
+
+**Why the snapshot (step 1) is not optional.** An nflverse refresh can silently
 change *historical* values, not just append new ones. After the August 2026
 refresh the rushing quantile artifacts moved (crossing rate 5.12% → 5.80% at an
 identical row count and identical spine membership) and we could not isolate the
@@ -79,8 +111,8 @@ Proven in the 2026-08-27 dry run: the snapshot diff caught receiving 30,574 →
 confirmed purely additive with 0 rows lost and QB/rushing unchanged — in seconds,
 and with certainty rather than inference.
 
-**Why `data/raw/` is snapshotted too (added 2026-09-07).** The original step 2
-copied only `data/features/`, on the assumption that the matrices are where
+**Why `data/raw/` is snapshotted too (added 2026-09-07).** The original snapshot
+step copied only `data/features/`, on the assumption that the matrices are where
 change shows up. On 2026-09-07 that assumption failed in the other direction:
 all three matrices came back **byte-identical** — 0 rows added, 0 removed, 0
 changed values — while `players.parquet` was the file that had actually moved,
@@ -106,7 +138,7 @@ pruned. **Old snapshots can be deleted once that week's diff has been read** —
 the value is entirely in the comparison, not in the archive. Keep at least the
 last two (§2 rule above).
 
-**Watch the spine builders' output during step 3** — see §6 (label audit).
+**Watch the spine builders' output during step 2** — see §6 (label audit).
 
 Artifact rebuilds are **not** part of the weekly cadence. The receiving sigma
 table / z-pool and the rushing quantile models are season-static by design; the
