@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Evaluation — {{ season }}{% if week %} wk{{ week }}{% endif %}</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb;
+    --panel: #f9fafb; --blocking: #b91c1c; --check: #b45309; --discount: #6b7280;
+    --avail: #b91c1c; --availbg: #fef2f2; --good: #15803d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1115; --fg:#e6e6e6; --muted:#9aa1ab; --line:#272b33;
+            --panel:#161920; --blocking:#f87171; --check:#fbbf24; --discount:#9aa1ab;
+            --avail:#f87171; --availbg:#2a1416; --good:#4ade80; }
+  }
+  body { background: var(--bg); color: var(--fg); margin: 0;
+         font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 24px 20px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 32px 0 8px; padding-bottom: 6px;
+       border-bottom: 1px solid var(--line); }
+  h3 { font-size: 13px; margin: 20px 0 6px; color: var(--muted);
+       text-transform: uppercase; letter-spacing: .04em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  nav.top { display: flex; gap: 4px; margin: 14px 0 18px;
+            border-bottom: 1px solid var(--line); }
+  nav.top a { padding: 7px 16px; text-decoration: none; color: var(--muted);
+              border: 1px solid transparent; border-bottom: none; font-size: 13px;
+              border-radius: 5px 5px 0 0; margin-bottom: -1px; }
+  nav.top a.active { color: var(--fg); font-weight: 600; background: var(--panel);
+                     border-color: var(--line); }
+  nav.tabs { display: flex; gap: 18px; margin: 0 0 18px; font-size: 13px; }
+  nav.tabs a { text-decoration: none; color: var(--muted); padding-bottom: 4px; }
+  nav.tabs a.active { color: var(--fg); font-weight: 600;
+                      border-bottom: 2px solid var(--fg); }
+  .banner { background: var(--panel); border: 1px solid var(--line);
+            border-radius: 6px; padding: 10px 12px; margin: 12px 0; font-size: 13px; }
+  .warn { border-color: var(--check); }
+  .warn strong { color: var(--check); }
+  .cards { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 6px; }
+  .card { flex: 1 1 150px; min-width: 150px; background: var(--panel);
+          border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
+  .card .k { color: var(--muted); font-size: 11px; text-transform: uppercase;
+             letter-spacing: .04em; }
+  .card .v { font-size: 19px; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .card .n { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px;
+       text-transform: uppercase; letter-spacing: .03em; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .scroll { overflow-x: auto; }
+  tr.avail td { background: var(--availbg); color: var(--avail); }
+  tr.avail td:first-child::before { content: "! "; font-weight: 700; }
+  .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .thin { color: var(--muted); }
+  .outside { color: var(--check); font-weight: 600; }
+  form { margin: 12px 0 0; font-size: 13px; }
+  input, select { padding: 3px 6px; background: var(--bg); color: var(--fg);
+                  border: 1px solid var(--line); border-radius: 4px; }
+  button { padding: 4px 12px; border: 1px solid var(--line); border-radius: 4px;
+           background: var(--panel); color: var(--fg); cursor: pointer; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+                background: var(--availbg); border: 1px solid var(--avail);
+                vertical-align: -1px; margin-right: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Evaluation — {{ season }}</h1>
+  <p class="sub">Read-only. Reads <code>*_grades.parquet</code> only — never writes,
+     never runs a model, never triggers a grade.</p>
+
+  <nav class="top">
+    <a href="/?season={{ season }}&week={{ week or 1 }}">Review</a>
+    <a href="/evaluation?season={{ season }}" class="active">Evaluation</a>
+  </nav>
+
+  {% if not any_grades %}
+    <div class="banner"><strong>No graded weeks for {{ season }}.</strong>
+      Grade a completed week first (RUNBOOK §2 step 5); this page will not grade it.</div>
+  {% else %}
+
+  <nav class="tabs">
+    <a href="/evaluation?season={{ season }}&tab=last_week{% if week %}&week={{ week }}{% endif %}"
+       class="{{ 'active' if tab == 'last_week' else '' }}">Last Week</a>
+    <a href="/evaluation?season={{ season }}&tab=season"
+       class="{{ 'active' if tab == 'season' else '' }}">Season</a>
+  </nav>
+
+  {# ============================================================ TAB 1 #}
+  {% if tab == 'last_week' %}
+    <form method="get">
+      <input type="hidden" name="tab" value="last_week">
+      season <input type="number" name="season" value="{{ season }}" style="width:70px">
+      week
+      <select name="week">
+        {% for w in graded_weeks %}
+          <option value="{{ w }}" {{ 'selected' if w == week else '' }}>{{ w }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Show</button>
+      <span class="note">latest graded: week {{ latest_graded_week }}</span>
+    </form>
+
+    {% for m in markets %}
+      <h2>{{ m.label }}</h2>
+      {% if not m.exists %}
+        <p class="empty">Not graded — no file <code>{{ m.filename }}</code>.</p>
+      {% elif m.error %}
+        <p class="empty">Error reading {{ m.filename }}: {{ m.error }}</p>
+      {% else %}
+        <p class="note">Source <code>{{ m.filename }}</code> ·
+           generated {{ m.generated or '—' }} · file mtime {{ m.mtime }}</p>
+
+        <div class="cards">
+          <div class="card"><div class="k">rows graded</div>
+            <div class="v">{{ m.n_graded }}</div>
+            <div class="n">of {{ m.n_rows }} on the board</div></div>
+          <div class="card"><div class="k">{{ m.point_label }}</div>
+            <div class="v">{{ '%.2f'|format(m.mae) if m.mae is not none else '—' }}</div>
+            <div class="n">n={{ m.n_slice }} · {{ m.slice_note }}</div></div>
+          <div class="card"><div class="k">bias</div>
+            <div class="v">{% if m.bias is not none %}{{ '%+.2f'|format(m.bias) }}{% else %}—{% endif %}</div>
+            <div class="n">+ = over-predicted</div></div>
+          <div class="card"><div class="k">over / under</div>
+            <div class="v">{{ m.ou_wins }}–{{ m.ou_n - m.ou_wins }}</div>
+            <div class="n">{{ '%.1f%%'|format(m.ou_rate * 100) if m.ou_rate is not none else '—' }}
+              · n={{ m.ou_n }}</div></div>
+          <div class="card"><div class="k">{{ m.accuracy_label }}</div>
+            <div class="v">{{ '%.3f'|format(m.accuracy) if m.accuracy is not none else '—' }}</div>
+            <div class="n">{{ m.accuracy_num }}/{{ m.accuracy_den }}</div></div>
+        </div>
+
+        <p class="note">Class counts:
+          {% for k, v in m.classes.items() %}<strong>{{ k }}</strong> {{ v }}{{ ', ' if not loop.last }}{% endfor %}
+          · all-GRADED MAE {{ '%.2f'|format(m.mae_all) if m.mae_all is not none else '—' }},
+          bias {{ '%+.2f'|format(m.bias_all) if m.bias_all is not none else '—' }} (n={{ m.n_graded }})</p>
+
+        {% for title, rowset in [('Best', m.best), ('Worst', m.worst)] %}
+          <h3>{{ title }} {{ rowset|length }} —
+            {{ 'smallest' if title == 'Best' else 'largest' }} |error| ·
+            {% if m.has_slice %}prop slice: {% endif %}{{ m.slice_note }} ·
+            n={{ m.n_slice }}</h3>
+          <div class="scroll"><table>
+            <tr><th>Player</th><th>Tm</th><th class="num">Pred</th><th class="num">Actual</th>
+                <th class="num">Error</th><th class="num">Line</th><th class="num">p(over)</th>
+                <th>Bucket</th></tr>
+            {% for r in rowset %}
+              <tr class="{{ 'avail' if r.availability else '' }}"
+                  {% if r.availability %}title="{{ r.availability_reason }}"{% endif %}>
+                <td>{{ r.player }}</td><td>{{ r.team or '—' }}</td>
+                <td class="num">{{ '%.1f'|format(r.pred) if r.pred is not none else '—' }}</td>
+                <td class="num">{{ '%.1f'|format(r.actual) if r.actual is not none else '—' }}</td>
+                <td class="num">{{ '%+.1f'|format(r.error) if r.error is not none else '—' }}</td>
+                <td class="num">{{ '%.1f'|format(r.line) if r.line is not none else '—' }}</td>
+                <td class="num">{{ '%.3f'|format(r.prob_over) if r.prob_over is not none else '—' }}</td>
+                <td>{{ r.bucket or '—' }}</td>
+              </tr>
+              {% if r.availability %}
+                <tr class="avail"><td colspan="8" style="font-size:12px">
+                  ↳ {{ r.availability_reason }}</td></tr>
+              {% endif %}
+            {% else %}
+              <tr><td colspan="8" class="empty">(no rows in the prop slice)</td></tr>
+            {% endfor %}
+          </table></div>
+        {% endfor %}
+
+        <h3>Availability events — {{ m.n_availability_excluded }} rows never graded</h3>
+        <div class="scroll"><table>
+          <tr><th>Player</th><th>Tm</th><th class="num">Pred</th><th class="num">Line</th>
+              <th class="num">p(over)</th><th>Status</th></tr>
+          {% for r in m.availability %}
+            <tr class="avail">
+              <td>{{ r.player }}</td><td>{{ r.team or '—' }}</td>
+              <td class="num">{{ '%.1f'|format(r.pred) if r.pred is not none else '—' }}</td>
+              <td class="num">{{ '%.1f'|format(r.line) if r.line is not none else '—' }}</td>
+              <td class="num">{{ '%.3f'|format(r.prob_over) if r.prob_over is not none else '—' }}</td>
+              <td>{{ r.status }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="empty">(none — every board row graded)</td></tr>
+          {% endfor %}
+        </table></div>
+        <p class="note">These have no actual and no error, so they cannot be ranked by
+           miss size — roster-resolution failures, not model failures. A further
+           <strong>{{ m.n_availability_flagged }}</strong> GRADED row(s) are flagged
+           inline in the tables above ({{ m.n_availability }} availability events in
+           total on this board).</p>
+
+        <p class="legend"><span class="sw"></span>
+          <strong>Availability event, not model error.</strong> Driven by the grader's
+          <code>status</code> column (DID_NOT_PLAY / NO_STATS / WRONG_STARTER); for QB
+          also a starter who did not finish as his team's leading passer — derived from
+          pass attempts, not inferred from low yardage.</p>
+      {% endif %}
+    {% endfor %}
+
+  {# ============================================================ TAB 2 #}
+  {% else %}
+    {% if season_totals and season_totals.n_weeks <= 2 %}
+      <div class="banner warn">
+        <strong>n warning — {{ season_totals.n_weeks }} graded week{{ '' if season_totals.n_weeks == 1 else 's' }}.</strong>
+        Rows inside a single week share one league-wide game environment, so the
+        effective sample is far below the row counts shown. Every table on this tab is
+        logging, not evidence. No re-tuning on this.
+      </div>
+    {% endif %}
+
+    <h2>Per-market summary</h2>
+    <p class="note">MAE and bias are <strong>prop-slice</strong>; + bias = over-predicted.</p>
+    <div class="scroll"><table>
+      <tr><th>Market</th><th class="num">Weeks</th><th class="num">Rows</th>
+          <th class="num">Graded</th><th class="num">Slice n</th><th class="num">MAE</th>
+          <th class="num">Bias</th><th class="num">O/U</th><th class="num">Rate</th>
+          <th class="num">Availability</th></tr>
+      {% for s in season_rows %}
+        <tr><td>{{ s.label }}</td>
+          <td class="num">{{ s.n_weeks }}</td><td class="num">{{ s.n_rows }}</td>
+          <td class="num">{{ s.n_graded }}</td><td class="num">{{ s.n_slice }}</td>
+          <td class="num">{{ '%.2f'|format(s.mae) if s.mae is not none else '—' }}</td>
+          <td class="num">{{ '%+.2f'|format(s.bias) if s.bias is not none else '—' }}</td>
+          <td class="num">{{ s.ou_wins }}–{{ s.ou_n - s.ou_wins }}</td>
+          <td class="num">{{ '%.1f%%'|format(s.ou_rate * 100) if s.ou_rate is not none else '—' }}</td>
+          <td class="num">{{ '%.3f'|format(s.accuracy) if s.accuracy is not none else '—' }}</td>
+        </tr>
+      {% endfor %}
+    </table></div>
+    <p class="note">Pooled over/under across markets:
+      <strong>{{ season_totals.ou_wins }}–{{ season_totals.ou_n - season_totals.ou_wins }}</strong>
+      ({{ '%.1f%%'|format(season_totals.ou_rate * 100) if season_totals.ou_rate is not none else '—' }}),
+      n={{ season_totals.ou_n }}.</p>
+
+    {% for s in season_rows %}
+      <h2>{{ s.label }}</h2>
+      <p class="note">Prop slice: {{ s.slice_note }}</p>
+
+      <h3>Week over week</h3>
+      <div class="scroll"><table>
+        <tr><th class="num">Wk</th><th class="num">Rows</th><th class="num">Graded</th>
+            <th class="num">Slice n</th><th class="num">MAE</th><th class="num">Bias</th>
+            <th class="num">O/U</th><th class="num">Rate</th><th class="num">Availability</th></tr>
+        {% for r in wow[s.market] %}
+          <tr><td class="num">{{ r.week }}</td><td class="num">{{ r.n_rows }}</td>
+            <td class="num">{{ r.n_graded }}</td><td class="num">{{ r.n_slice }}</td>
+            <td class="num">{{ '%.2f'|format(r.mae) if r.mae is not none else '—' }}</td>
+            <td class="num">{{ '%+.2f'|format(r.bias) if r.bias is not none else '—' }}</td>
+            <td class="num">{{ r.ou_wins }}–{{ r.ou_n - r.ou_wins }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.ou_rate * 100) if r.ou_rate is not none else '—' }}</td>
+            <td class="num">{{ r.accuracy_num }}/{{ r.accuracy_den }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9" class="empty">(no graded weeks)</td></tr>
+        {% endfor %}
+      </table></div>
+
+      {% set b = buckets[s.market] %}
+      <h3>Cumulative quantile buckets — prop slice only · n={{ b.n }}</h3>
+      {% if b.low_n %}
+        <div class="banner warn"><strong>n={{ b.n }}</strong>, below {{ b.low_n_threshold }}.
+          A six-cell table at this size is mostly sampling noise.</div>
+      {% endif %}
+      <div class="scroll"><table>
+        <tr><th>Bucket</th><th class="num">Weight</th><th class="num">Observed</th>
+            <th class="num">Expected</th><th class="num">Deviation</th>
+            <th class="num">±2 SE</th><th>Verdict</th></tr>
+        {% for r in b.rows %}
+          <tr><td>{{ r.bucket }}</td>
+            <td class="num">{{ '%.1f'|format(r.weight) }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.observed * 100) if r.observed is not none else '—' }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.expected * 100) }}</td>
+            <td class="num">{{ '%+.1f%%'|format(r.deviation * 100) if r.deviation is not none else '—' }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.se2 * 100) if r.se_valid and r.se2 is not none else 'n/a' }}</td>
+            <td class="{{ 'outside' if r.outside_noise else 'thin' }}">
+              {% if r.outside_noise %}outside noise{% elif not r.se_valid %}too few to test{% elif r.thin %}thin cell{% else %}within noise{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </table></div>
+      <p class="note">Tie-aware: boundary ties are read from the grader's own
+         pipe-joined bucket label and split evenly ({{ b.n_ties }} tie(s) this season).
+         ±2 SE is shown as n/a where a cell is too small for the normal approximation.</p>
+
+      {% set c = confidence[s.market] %}
+      <h3>Over/under by p(over) confidence band · n={{ c.n }}</h3>
+      {% if c.low_n %}
+        <div class="banner warn"><strong>n={{ c.n }}</strong>, below {{ c.low_n_threshold }}.
+          Not a threshold input yet.</div>
+      {% endif %}
+      <div class="scroll"><table>
+        <tr><th>Band</th><th class="num">n</th><th class="num">Predicted</th>
+            <th class="num">Realized</th><th class="num">Gap</th><th class="num">±2 SE</th>
+            <th>Note</th></tr>
+        {% for r in c.rows %}
+          <tr><td>{{ r.band }}</td><td class="num">{{ r.n }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.predicted * 100) if r.predicted is not none else '—' }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.realized * 100) if r.realized is not none else '—' }}</td>
+            <td class="num">{{ '%+.1f%%'|format(r.gap * 100) if r.gap is not none else '—' }}</td>
+            <td class="num">{{ '%.1f%%'|format(r.se2 * 100) if r.se_valid and r.se2 is not none else 'n/a' }}</td>
+            <td class="thin">{% if r.n == 0 %}empty{% elif r.thin %}thin{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </table></div>
+    {% endfor %}
+
+    <h2>Pooled across all three markets — over/under by p(over) band</h2>
+    {% if pooled.low_n %}
+      <div class="banner warn"><strong>n={{ pooled.n }}</strong>, below
+        {{ pooled.low_n_threshold }}. This is the direct input to the week 5–6 threshold
+        decision, and it is not yet usable for that purpose.</div>
+    {% endif %}
+    <div class="scroll"><table>
+      <tr><th>Band</th><th class="num">n</th><th class="num">Predicted</th>
+          <th class="num">Realized</th><th class="num">Gap</th><th class="num">±2 SE</th>
+          <th>Note</th></tr>
+      {% for r in pooled.rows %}
+        <tr><td>{{ r.band }}</td><td class="num">{{ r.n }}</td>
+          <td class="num">{{ '%.1f%%'|format(r.predicted * 100) if r.predicted is not none else '—' }}</td>
+          <td class="num">{{ '%.1f%%'|format(r.realized * 100) if r.realized is not none else '—' }}</td>
+          <td class="num">{{ '%+.1f%%'|format(r.gap * 100) if r.gap is not none else '—' }}</td>
+          <td class="num">{{ '%.1f%%'|format(r.se2 * 100) if r.se_valid and r.se2 is not none else 'n/a' }}</td>
+          <td class="thin">{% if r.n == 0 %}empty{% elif r.thin %}thin{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </table></div>
+
+    <p class="note">No edge column, no market comparison, and no highlighting of
+       profitable-looking rows anywhere on this page. Pure logging until the threshold
+       is set.</p>
+  {% endif %}
+  {% endif %}
+
+</div>
+</body>
+</html>
