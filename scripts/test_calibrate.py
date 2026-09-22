@@ -89,7 +89,14 @@ for week in sorted(test["week"].unique()):
 mae = np.mean(np.abs(calibrated - test["y_test"].values))
 bias = np.mean(calibrated - test["y_test"].values)
 
-expected_mae, expected_bias = 57.73, 3.72
+# Re-pinned 2026-09-22 for the step-95 leading-passer correction. The matrix
+# previously labelled a team-game with schedules' designated starter, which on
+# 127 of 2,912 played team-games was not the man who actually threw the ball --
+# so the model was trained partly on a backup's four-attempt cameo labelled as
+# that team's start. Deriving the starter from the leading passer corrected
+# those labels and added 50 previously-dropped team-games, which moved this
+# replay: MAE 57.73 -> 55.75 (better by ~2 yards), bias 3.72 -> 3.67.
+expected_mae, expected_bias = 55.75, 3.67
 assert round(mae, 2) == expected_mae, f"MAE ({mae:.2f}) != expected ({expected_mae})"
 assert round(bias, 2) == expected_bias, f"bias ({bias:.2f}) != expected ({expected_bias})"
 print(f"PASS: 2025 calibrated MAE ({mae:.2f}) == expected ({expected_mae})")

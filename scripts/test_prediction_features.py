@@ -49,6 +49,23 @@ section("(a) Replay equivalence: build_prediction_features vs qb_matrix.parquet"
 
 qb_matrix = pd.read_parquet(FEATURES_DIR / "qb_matrix.parquet")
 
+# Attempts per (team, qb) for the disagreement report below. Informational only.
+_ps = pd.read_parquet(RAW_DATA_DIR / "player_stats.parquet")
+_att = _ps.set_index(["season", "week", "team", "player_id"])["attempts"]
+_names = _ps.drop_duplicates("player_id").set_index("player_id")["player_display_name"]
+
+
+def _qb_label(pid, season, week, team):
+    """'Name (N att)' for the disagreement report."""
+    name = _names.get(pid, pid)
+    try:
+        a = _att.get((season, week, team, pid))
+        a = int(a) if pd.notna(a) else None
+    except (KeyError, TypeError):
+        a = None
+    return f"{name} ({a} att)" if a is not None else f"{name} (no att)"
+
+
 for week in (5, 14):
     pred_df = build_prediction_features(2025, week)
     actual_df = qb_matrix[(qb_matrix["season"] == 2025) & (qb_matrix["week"] == week)]
@@ -57,9 +74,49 @@ for week in (5, 14):
         f"week {week}: row count mismatch (pred={len(pred_df)}, actual={len(actual_df)})"
     )
 
+    # COMMON-KEY PARITY, not row-for-row parity (step 96).
+    #
+    # The two paths label the starting quarterback by DIFFERENT definitions, and
+    # that is deliberate rather than a defect:
+    #
+    #   qb_matrix                 labels by HINDSIGHT  -- the leading passer by
+    #                             attempts, which is what actually happened
+    #                             (step 95).
+    #   build_prediction_features labels by FORECAST   -- schedules' designated
+    #                             starter, or a starters_override entry, which
+    #                             is all a Wednesday run can know.
+    #
+    # On the 127 of 2,912 team-games where nflverse's designation was not the
+    # leading passer, the two therefore name different quarterbacks and their
+    # rolling features legitimately differ -- they describe different players.
+    # Asserting row-for-row equality would force the serving path to use
+    # hindsight, which would inject lookahead into every backtest.
+    #
+    # So parity is asserted over the INTERSECTION: team-games where both paths
+    # name the same quarterback. That set must match exactly -- any mismatch
+    # there is a real feature-construction bug. Disagreements are reported
+    # informationally, the same pattern test_receiving_prediction_features and
+    # test_rushing_prediction_features use for roster churn.
+    pred_qb = dict(zip(pred_df["team"], pred_df["qb_id"]))
+    actual_qb = dict(zip(actual_df["team"], actual_df["qb_id"]))
+    common_teams = {tm for tm, q in pred_qb.items()
+                    if tm in actual_qb and q == actual_qb[tm]}
+    disagreements = sorted(tm for tm in pred_qb
+                           if tm in actual_qb and pred_qb[tm] != actual_qb[tm])
+
+    print(f"week {week}: pred={len(pred_df)} rows, actual={len(actual_df)} rows, "
+          f"common_qb={len(common_teams)}, disagreements={len(disagreements)}")
+    if disagreements:
+        print(f"  starter disagreements (predicted vs matrix) — informational:")
+        for tm in disagreements:
+            print(f"    {tm:4s} predicted={_qb_label(pred_qb[tm], 2025, week, tm):32s}"
+                  f" matrix={_qb_label(actual_qb[tm], 2025, week, tm)}")
+
     mismatches = []
     for _, pred_row in pred_df.iterrows():
         team = pred_row["team"]
+        if team not in common_teams:
+            continue
         actual_rows = actual_df[actual_df["team"] == team]
         assert len(actual_rows) == 1, f"week {week}, team {team}: expected 1 actual row, got {len(actual_rows)}"
         actual_row = actual_rows.iloc[0]
@@ -85,7 +142,10 @@ for week in (5, 14):
             print(f"  team={team} col={col}: pred={pred_val} actual={actual_val}")
 
     assert not mismatches, f"week {week}: {len(mismatches)} feature mismatches (see above)"
-    print(f"PASS: week {week} ({len(pred_df)} rows) — all feature columns match qb_matrix.parquet")
+    assert common_teams, f"week {week}: no team-game where both paths name the same QB"
+    print(f"PASS: week {week} ({len(common_teams)} common-QB rows, "
+          f"{len(disagreements)} starter disagreement(s) skipped) — all feature "
+          f"columns match qb_matrix.parquet")
 
 
 # --- (b) No self-leakage for 2025 week 10 ---
